@@ -1,0 +1,28 @@
+{
+  "name": "my-project",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:ui": "vite",
+    "dev:api": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev:all": "concurrently -n ui,api -c cyan,magenta \"npm run dev\" \"npm run dev:api\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "export:sources": "node scripts/export-sources-to-public.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "vite": "^8.0.1",
+    "vitest": "^4.1.2"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "node-cron": "^4.2.1"
+  }
+}

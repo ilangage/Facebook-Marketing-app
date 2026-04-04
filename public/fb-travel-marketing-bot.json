@@ -1,0 +1,253 @@
+{
+    "project": {
+        "name": "fb-travel-marketing-bot",
+        "description_si": "Meta/Facebook Marketing API + Next.js + MongoDB use karala travel website ekakata tracking, audience building, Conversions API event sending, custom audience syncing, adset targeting, ad insights analysis saha simple automation karana repo ekak.",
+        "cursor_explanation_si": {
+            "how_it_works": [
+                "Me bot eka audience hoyana magic system ekak nemei. Meeka Meta algorithm ekata hondama signal dena machine ekak.",
+                "User kenek package page baluwoth, inquiry start kaloth, WhatsApp click kaloth, booking kaloth ehema events site eken capture wenawa.",
+                "E events client side Pixel walin saha server side Conversions API walin Meta ekata yawenawa.",
+                "Backend eka e data DB ekata save karala user segments hadanawa: hot, warm, honeymoon, family, luxury, abandoned_lead wage.",
+                "Qualified users tika hashed karala Custom Audience walata sync karanawa.",
+                "Best users source ekak widihata use karala Lookalike audience hadanna puluwan.",
+                "Ad insights pull karala CPA, CTR, CPC, ROAS wage metrics balala bad adsets pause karanawa, honda adsets scale karanawa.",
+                "E nisa success eka enne perfect audience kalinma danagena nemei; data gather karala, Meta learn karanna denna, passe winners tika scale karala."
+            ],
+            "why_it_can_improve_roi": [
+                "Server side tracking nisa signal loss aduwenawa.",
+                "Custom audiences nisa already high-intent users wenama target karanna puluwan.",
+                "Lookalikes nisa buy karana ayata samana aya Meta hoyagena deliver karanawa.",
+                "Automation nisa budget wastage adu karanna puluwan.",
+                "Creative, targeting, optimization, conversion signals okkoma ekathu unaama ROI wadi wenawa."
+            ],
+            "expected_output": {
+                "api_outputs": [
+                    "tracked events response",
+                    "custom audience id",
+                    "uploaded users count",
+                    "created campaign/adset/ad ids",
+                    "insights report with spend, clicks, cpc, ctr, leads, purchases"
+                ],
+                "business_outputs": [
+                    "high-intent audience lists",
+                    "retargeting pools 7d/30d/90d",
+                    "lookalike seeds",
+                    "best converting segments report",
+                    "adsets auto-paused or scaled based on thresholds"
+                ]
+            }
+        }
+    },
+    "stack": {
+        "frontend": "Next.js 14 App Router",
+        "database": "MongoDB with Mongoose",
+        "runtime": "Node.js 20+",
+        "meta_api": [
+            "Marketing API",
+            "Conversions API"
+        ]
+    },
+    "setup_steps": [
+        "1. Meta app ekak create karala Marketing API access token, ad account id, pixel id ganna.",
+        "2. MongoDB database ekak create karanna.",
+        "3. Me repo files tika create karanna.",
+        "4. npm install run karanna.",
+        "5. .env.local fill karanna.",
+        "6. npm run dev run karala /api/meta/health check karanna.",
+        "7. Travel package pages walin tracking events fire wenawada balanna.",
+        "8. /api/meta/sync-audience POST karala test users Custom Audience ekata push karanna.",
+        "9. /api/meta/create-campaign POST karala campaign/adset/ad create karanna.",
+        "10. /api/meta/optimize GET run karala thresholds anuwa actions ganna."
+    ],
+    "env_example": {
+        "META_API_VERSION": "v23.0",
+        "META_ACCESS_TOKEN": "YOUR_LONG_LIVED_ACCESS_TOKEN",
+        "META_AD_ACCOUNT_ID": "act_1234567890",
+        "META_PIXEL_ID": "1234567890",
+        "META_APP_ID": "YOUR_APP_ID",
+        "META_APP_SECRET": "YOUR_APP_SECRET",
+        "META_PAGE_ID": "OPTIONAL_PAGE_ID",
+        "MONGODB_URI": "mongodb://127.0.0.1:27017/fb_travel_bot",
+        "APP_BASE_URL": "http://localhost:3000",
+        "OPTIMIZER_TARGET_CPA": "6",
+        "OPTIMIZER_MIN_ROAS": "2.5",
+        "DEFAULT_CURRENCY": "USD"
+    },
+    "repo": {
+        "package.json": "{\n  \"name\": \"fb-travel-marketing-bot\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"scripts\": {\n    \"dev\": \"next dev\",\n    \"build\": \"next build\",\n    \"start\": \"next start\",\n    \"lint\": \"next lint\",\n    \"seed\": \"node scripts/seed-demo-users.mjs\",\n    \"optimize\": \"node scripts/run-optimizer.mjs\"\n  },\n  \"dependencies\": {\n    \"crypto-js\": \"^4.2.0\",\n    \"mongoose\": \"^8.11.0\",\n    \"next\": \"^14.2.30\",\n    \"react\": \"^18.3.1\",\n    \"react-dom\": \"^18.3.1\"\n  }\n}",
+        ".env.local": "META_API_VERSION=v23.0\nMETA_ACCESS_TOKEN=YOUR_LONG_LIVED_ACCESS_TOKEN\nMETA_AD_ACCOUNT_ID=act_1234567890\nMETA_PIXEL_ID=1234567890\nMETA_APP_ID=YOUR_APP_ID\nMETA_APP_SECRET=YOUR_APP_SECRET\nMETA_PAGE_ID=\nMONGODB_URI=mongodb://127.0.0.1:27017/fb_travel_bot\nAPP_BASE_URL=http://localhost:3000\nOPTIMIZER_TARGET_CPA=6\nOPTIMIZER_MIN_ROAS=2.5\nDEFAULT_CURRENCY=USD\n",
+        "next.config.js": "/** @type {import('next').NextConfig} */\nconst nextConfig = {\n  reactStrictMode: true\n};\n\nmodule.exports = nextConfig;\n",
+        "src/app/layout.js": "export const metadata = {\n  title: 'FB Travel Marketing Bot',\n  description: 'Next.js + Meta Marketing API automation starter'\n};\n\nexport default function RootLayout({ children }) {\n  return (\n    <html lang=\"en\">\n      <body style={{ fontFamily: 'Arial, sans-serif', margin: 24 }}>{children}</body>\n    </html>\n  );\n}\n",
+        "src/app/page.js": "'use client';\n\nimport { useState } from 'react';\nimport { trackCustomEvent } from '../lib/fbPixel';\n\nexport default function HomePage() {\n  const [status, setStatus] = useState('idle');\n\n  async function sendServerEvent(eventName, payload = {}) {\n    setStatus('sending');\n    const res = await fetch('/api/meta/track', {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ eventName, ...payload })\n    });\n    const data = await res.json();\n    setStatus(JSON.stringify(data));\n  }\n\n  return (\n    <main>\n      <h1>FB Travel Marketing Bot</h1>\n      <p>Travel package tracking demo page.</p>\n      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>\n        <button onClick={() => { trackCustomEvent('ViewContent', { content_name: 'Maldives Package' }); sendServerEvent('ViewContent', { destination: 'Maldives', packageType: 'luxury' }); }}>Track ViewContent</button>\n        <button onClick={() => { trackCustomEvent('Lead', { content_name: 'Lead Form' }); sendServerEvent('Lead', { destination: 'Dubai', packageType: 'family' }); }}>Track Lead</button>\n        <button onClick={() => { trackCustomEvent('Search', { search_string: 'Bali honeymoon' }); sendServerEvent('Search', { destination: 'Bali', packageType: 'honeymoon' }); }}>Track Search</button>\n      </div>\n      <pre style={{ marginTop: 24, whiteSpace: 'pre-wrap' }}>{status}</pre>\n    </main>\n  );\n}\n",
+        "src/lib/fbPixel.js": "export function trackCustomEvent(eventName, payload = {}) {\n  if (typeof window !== 'undefined' && typeof window.fbq === 'function') {\n    window.fbq('track', eventName, payload);\n  }\n}\n",
+        "src/lib/db.js": "import mongoose from 'mongoose';\n\nconst MONGODB_URI = process.env.MONGODB_URI;\n\nif (!MONGODB_URI) {\n  throw new Error('MONGODB_URI is missing');\n}\n\nlet cached = global.mongoose;\nif (!cached) {\n  cached = global.mongoose = { conn: null, promise: null };\n}\n\nexport async function connectDB() {\n  if (cached.conn) return cached.conn;\n  if (!cached.promise) {\n    cached.promise = mongoose.connect(MONGODB_URI, { bufferCommands: false }).then((mongooseInstance) => mongooseInstance);\n  }\n  cached.conn = await cached.promise;\n  return cached.conn;\n}\n",
+        "src/lib/hash.js": "import CryptoJS from 'crypto-js';\n\nexport function normalizeEmail(value = '') {\n  return value.trim().toLowerCase();\n}\n\nexport function normalizePhone(value = '') {\n  return value.replace(/[^0-9]/g, '');\n}\n\nexport function sha256(value = '') {\n  return CryptoJS.SHA256(value).toString(CryptoJS.enc.Hex);\n}\n\nexport function hashUser(user) {\n  const email = normalizeEmail(user.email || '');\n  const phone = normalizePhone(user.phone || '');\n\n  return {\n    email: email ? sha256(email) : null,\n    phone: phone ? sha256(phone) : null,\n    fn: user.firstName ? sha256(user.firstName.trim().toLowerCase()) : null,\n    ln: user.lastName ? sha256(user.lastName.trim().toLowerCase()) : null,\n    country: user.country ? sha256(user.country.trim().toLowerCase()) : null\n  };\n}\n",
+        "src/lib/meta.js": "const API_VERSION = process.env.META_API_VERSION || 'v23.0';\nconst GRAPH_BASE = `https://graph.facebook.com/${API_VERSION}`;\n\nfunction getToken() {\n  const token = process.env.META_ACCESS_TOKEN;\n  if (!token) throw new Error('META_ACCESS_TOKEN missing');\n  return token;\n}\n\nexport async function metaFetch(path, options = {}) {\n  const token = getToken();\n  const method = options.method || 'GET';\n  const headers = {\n    'Content-Type': 'application/json',\n    ...(options.headers || {})\n  };\n\n  let url = `${GRAPH_BASE}${path}`;\n  const body = options.body ? JSON.parse(options.body) : null;\n\n  if (method === 'GET') {\n    const query = new URLSearchParams({ access_token: token, ...(options.query || {}) });\n    url += `?${query.toString()}`;\n  }\n\n  const res = await fetch(url, {\n    method,\n    headers,\n    body: method === 'GET' ? undefined : JSON.stringify({ ...(body || {}), access_token: token })\n  });\n\n  const data = await res.json();\n  if (!res.ok || data.error) {\n    throw new Error(JSON.stringify(data));\n  }\n\n  return data;\n}\n\nexport async function sendConversionsEvent({ eventName, eventId, userData, customData = {}, eventSourceUrl }) {\n  return metaFetch(`/${process.env.META_PIXEL_ID}/events`, {\n    method: 'POST',\n    body: JSON.stringify({\n      data: [\n        {\n          event_name: eventName,\n          event_time: Math.floor(Date.now() / 1000),\n          event_id: eventId,\n          action_source: 'website',\n          event_source_url: eventSourceUrl || process.env.APP_BASE_URL,\n          user_data: userData,\n          custom_data: customData\n        }\n      ]\n    })\n  });\n}\n\nexport async function createCustomAudience({ name, description, subtype = 'CUSTOM', customer_file_source = 'USER_PROVIDED_ONLY' }) {\n  return metaFetch(`/${process.env.META_AD_ACCOUNT_ID}/customaudiences`, {\n    method: 'POST',\n    body: JSON.stringify({ name, description, subtype, customer_file_source })\n  });\n}\n\nexport async function uploadUsersToAudience({ audienceId, payload }) {\n  return metaFetch(`/${audienceId}/users`, {\n    method: 'POST',\n    body: JSON.stringify(payload)\n  });\n}\n\nexport async function createCampaign({ name, objective = 'OUTCOME_SALES', status = 'PAUSED', special_ad_categories = [] }) {\n  return metaFetch(`/${process.env.META_AD_ACCOUNT_ID}/campaigns`, {\n    method: 'POST',\n    body: JSON.stringify({ name, objective, status, special_ad_categories })\n  });\n}\n\nexport async function createAdSet(payload) {\n  return metaFetch(`/${process.env.META_AD_ACCOUNT_ID}/adsets`, {\n    method: 'POST',\n    body: JSON.stringify(payload)\n  });\n}\n\nexport async function createAdCreative(payload) {\n  return metaFetch(`/${process.env.META_AD_ACCOUNT_ID}/adcreatives`, {\n    method: 'POST',\n    body: JSON.stringify(payload)\n  });\n}\n\nexport async function createAd(payload) {\n  return metaFetch(`/${process.env.META_AD_ACCOUNT_ID}/ads`, {\n    method: 'POST',\n    body: JSON.stringify(payload)\n  });\n}\n\nexport async function getInsights({ level = 'adset', fields = 'campaign_name,adset_name,spend,clicks,cpc,ctr,reach,impressions,actions,action_values,purchase_roas', time_range }) {\n  return metaFetch(`/${process.env.META_AD_ACCOUNT_ID}/insights`, {\n    method: 'GET',\n    query: { level, fields, time_range: JSON.stringify(time_range || { since: '2026-03-01', until: '2026-03-28' }) }\n  });\n}\n\nexport async function updateAdSetStatus(adsetId, status) {\n  return metaFetch(`/${adsetId}`, {\n    method: 'POST',\n    body: JSON.stringify({ status })\n  });\n}\n",
+        "src/lib/targeting-configs.js": "export const targetingConfigs = {\n  broad_lk_21_55: {\n    name: 'Broad Sri Lanka 21-55',\n    targeting: {\n      geo_locations: { countries: ['LK'] },\n      age_min: 21,\n      age_max: 55,\n      locales: [1000]\n    }\n  },\n  honeymoon_lk: {\n    name: 'Honeymoon Sri Lanka',\n    targeting: {\n      geo_locations: { countries: ['LK'] },\n      age_min: 23,\n      age_max: 40,\n      flexible_spec: [\n        { interests: [\n          { id: '6003349442621', name: 'Air travel' },\n          { id: '6003139266461', name: 'Travel' },\n          { id: '6003679657841', name: 'Honeymoon' }\n        ] }\n      ]\n    }\n  },\n  family_travel_lk: {\n    name: 'Family Travel Sri Lanka',\n    targeting: {\n      geo_locations: { countries: ['LK'] },\n      age_min: 28,\n      age_max: 50,\n      flexible_spec: [\n        { interests: [\n          { id: '6003139266461', name: 'Travel' },\n          { id: '6003455668141', name: 'Hotels' },\n          { id: '6003349442621', name: 'Air travel' }\n        ] }\n      ]\n    }\n  },\n  luxury_travel_lk: {\n    name: 'Luxury Travel Sri Lanka',\n    targeting: {\n      geo_locations: { countries: ['LK'] },\n      age_min: 25,\n      age_max: 55,\n      flexible_spec: [\n        { interests: [\n          { id: '6003139266461', name: 'Travel' },\n          { id: '6003455668141', name: 'Hotels' },\n          { id: '6003107902433', name: 'Luxury goods' }\n        ] }\n      ]\n    }\n  }\n};\n\nexport function buildTargeting(key, customAudienceId = null, excludedAudienceId = null) {\n  const base = targetingConfigs[key];\n  if (!base) throw new Error(`Unknown targeting config: ${key}`);\n  const targeting = JSON.parse(JSON.stringify(base.targeting));\n\n  if (customAudienceId) {\n    targeting.custom_audiences = [{ id: customAudienceId }];\n  }\n\n  if (excludedAudienceId) {\n    targeting.excluded_custom_audiences = [{ id: excludedAudienceId }];\n  }\n\n  return targeting;\n}\n",
+        "src/models/User.js": "import mongoose from 'mongoose';\n\nconst UserSchema = new mongoose.Schema({\n  email: { type: String, index: true },\n  phone: String,\n  firstName: String,\n  lastName: String,\n  country: { type: String, default: 'LK' },\n  destinationInterest: String,\n  packageType: String,\n  tags: [String],\n  leadStatus: { type: String, default: 'new' },\n  totalValue: { type: Number, default: 0 },\n  lastActivityAt: Date\n}, { timestamps: true });\n\nexport default mongoose.models.User || mongoose.model('User', UserSchema);\n",
+        "src/models/Event.js": "import mongoose from 'mongoose';\n\nconst EventSchema = new mongoose.Schema({\n  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },\n  eventName: String,\n  destination: String,\n  packageType: String,\n  sourceUrl: String,\n  metaEventId: String,\n  value: { type: Number, default: 0 }\n}, { timestamps: true });\n\nexport default mongoose.models.Event || mongoose.model('Event', EventSchema);\n",
+        "src/services/audienceEngine.js": "export function segmentUser(user) {\n  const tags = new Set(user.tags || []);\n  const now = Date.now();\n  const last = user.lastActivityAt ? new Date(user.lastActivityAt).getTime() : 0;\n  const daysSinceLast = last ? (now - last) / (1000 * 60 * 60 * 24) : 999;\n\n  if (daysSinceLast <= 7) tags.add('hot');\n  else if (daysSinceLast <= 30) tags.add('warm');\n  else tags.add('cold');\n\n  if (user.packageType === 'honeymoon') tags.add('honeymoon');\n  if (user.packageType === 'family') tags.add('family');\n  if (user.totalValue >= 1000) tags.add('high_value');\n  if (user.leadStatus === 'abandoned') tags.add('abandoned_lead');\n\n  return Array.from(tags);\n}\n",
+        "src/services/reporting.js": "export function summarizeInsights(data = []) {\n  return data.map((row) => ({\n    campaign: row.campaign_name,\n    adset: row.adset_name,\n    spend: Number(row.spend || 0),\n    clicks: Number(row.clicks || 0),\n    cpc: Number(row.cpc || 0),\n    ctr: Number(row.ctr || 0),\n    reach: Number(row.reach || 0),\n    impressions: Number(row.impressions || 0),\n    purchase_roas: Array.isArray(row.purchase_roas) && row.purchase_roas[0] ? Number(row.purchase_roas[0].value || 0) : 0\n  }));\n}\n\nexport function getOptimizerActions(rows, targetCpa, minRoas) {\n  return rows.map((row) => {\n    const spend = Number(row.spend || 0);\n    const clicks = Number(row.clicks || 0);\n    const actions = Array.isArray(row.actions) ? row.actions : [];\n    const leadAction = actions.find((a) => a.action_type === 'lead');\n    const leads = leadAction ? Number(leadAction.value) : 0;\n    const cpa = leads > 0 ? spend / leads : spend;\n    const roas = Array.isArray(row.purchase_roas) && row.purchase_roas[0] ? Number(row.purchase_roas[0].value || 0) : 0;\n\n    if (leads === 0 && spend > targetCpa * 2) {\n      return { adsetId: row.adset_id, action: 'PAUSE', reason: 'No leads and spend too high', cpa, roas, clicks };\n    }\n\n    if (cpa > targetCpa && spend > targetCpa) {\n      return { adsetId: row.adset_id, action: 'PAUSE', reason: 'CPA above target', cpa, roas, clicks };\n    }\n\n    if (roas >= minRoas) {\n      return { adsetId: row.adset_id, action: 'SCALE', reason: 'ROAS above target', cpa, roas, clicks };\n    }\n\n    return { adsetId: row.adset_id, action: 'KEEP', reason: 'Within thresholds', cpa, roas, clicks };\n  });\n}\n",
+        "src/app/api/meta/health/route.js": "import { NextResponse } from 'next/server';\n\nexport async function GET() {\n  return NextResponse.json({\n    ok: true,\n    appBaseUrl: process.env.APP_BASE_URL || null,\n    apiVersion: process.env.META_API_VERSION || 'v23.0'\n  });\n}\n",
+        "src/app/api/meta/track/route.js": "import { NextResponse } from 'next/server';\nimport { connectDB } from '../../../../lib/db';\nimport User from '../../../../models/User';\nimport Event from '../../../../models/Event';\nimport { sendConversionsEvent } from '../../../../lib/meta';\nimport { hashUser } from '../../../../lib/hash';\n\nexport async function POST(request) {\n  try {\n    const body = await request.json();\n    await connectDB();\n\n    let user = null;\n    if (body.email) {\n      user = await User.findOne({ email: body.email });\n    }\n\n    if (!user) {\n      user = await User.create({\n        email: body.email || '',\n        phone: body.phone || '',\n        firstName: body.firstName || '',\n        lastName: body.lastName || '',\n        destinationInterest: body.destination || '',\n        packageType: body.packageType || '',\n        lastActivityAt: new Date()\n      });\n    } else {\n      user.lastActivityAt = new Date();\n      if (body.destination) user.destinationInterest = body.destination;\n      if (body.packageType) user.packageType = body.packageType;\n      await user.save();\n    }\n\n    const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;\n\n    const event = await Event.create({\n      userId: user._id,\n      eventName: body.eventName,\n      destination: body.destination || '',\n      packageType: body.packageType || '',\n      sourceUrl: body.sourceUrl || process.env.APP_BASE_URL,\n      metaEventId: eventId,\n      value: Number(body.value || 0)\n    });\n\n    const hashed = hashUser(user);\n    const userData = {};\n    if (hashed.email) userData.em = [hashed.email];\n    if (hashed.phone) userData.ph = [hashed.phone];\n    if (hashed.fn) userData.fn = [hashed.fn];\n    if (hashed.ln) userData.ln = [hashed.ln];\n    if (hashed.country) userData.country = [hashed.country];\n\n    const capiResponse = await sendConversionsEvent({\n      eventName: body.eventName,\n      eventId,\n      userData,\n      customData: {\n        currency: process.env.DEFAULT_CURRENCY || 'USD',\n        value: Number(body.value || 0),\n        content_name: body.destination || 'Travel Package',\n        content_category: body.packageType || 'travel'\n      },\n      eventSourceUrl: body.sourceUrl || process.env.APP_BASE_URL\n    });\n\n    return NextResponse.json({ ok: true, eventId, dbEventId: event._id, capiResponse });\n  } catch (error) {\n    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });\n  }\n}\n",
+        "src/app/api/meta/sync-audience/route.js": "import { NextResponse } from 'next/server';\nimport { connectDB } from '../../../../lib/db';\nimport User from '../../../../models/User';\nimport { segmentUser } from '../../../../services/audienceEngine';\nimport { createCustomAudience, uploadUsersToAudience } from '../../../../lib/meta';\nimport { hashUser } from '../../../../lib/hash';\n\nexport async function POST(request) {\n  try {\n    const body = await request.json();\n    const segment = body.segment || 'hot';\n    const audienceName = body.audienceName || `Travel Audience - ${segment}`;\n\n    await connectDB();\n    const users = await User.find({});\n    const filtered = users.filter((user) => segmentUser(user).includes(segment));\n\n    const created = await createCustomAudience({\n      name: audienceName,\n      description: `Segment synced from Next.js bot: ${segment}`\n    });\n\n    const payloadUsers = filtered\n      .map((user) => hashUser(user))\n      .filter((u) => u.email || u.phone)\n      .map((u) => [u.email || '', u.phone || '']);\n\n    const uploadRes = await uploadUsersToAudience({\n      audienceId: created.id,\n      payload: {\n        payload: { schema: ['EMAIL', 'PHONE'], data: payloadUsers },\n        session: { session_id: Date.now(), batch_seq: 1, last_batch_flag: true, estimated_num_total: payloadUsers.length }\n      }\n    });\n\n    return NextResponse.json({ ok: true, audienceId: created.id, audienceName, matchedUsers: payloadUsers.length, uploadRes });\n  } catch (error) {\n    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });\n  }\n}\n",
+        "src/app/api/meta/create-campaign/route.js": "import { NextResponse } from 'next/server';\nimport { buildTargeting } from '../../../../lib/targeting-configs';\nimport { createCampaign, createAdSet, createAdCreative, createAd } from '../../../../lib/meta';\n\nexport async function POST(request) {\n  try {\n    const body = await request.json();\n    const targeting = buildTargeting(body.targetingKey || 'broad_lk_21_55', body.customAudienceId || null, body.excludedAudienceId || null);\n\n    const campaign = await createCampaign({\n      name: body.campaignName || 'Travel Sales Campaign',\n      objective: body.objective || 'OUTCOME_SALES',\n      status: 'PAUSED'\n    });\n\n    const adset = await createAdSet({\n      name: body.adsetName || 'Travel Adset 1',\n      campaign_id: campaign.id,\n      daily_budget: body.dailyBudget || 2000,\n      billing_event: 'IMPRESSIONS',\n      optimization_goal: body.optimizationGoal || 'OFFSITE_CONVERSIONS',\n      bid_strategy: 'LOWEST_COST_WITHOUT_CAP',\n      targeting,\n      status: 'PAUSED',\n      promoted_object: { pixel_id: process.env.META_PIXEL_ID, custom_event_type: body.customEventType || 'PURCHASE' },\n      start_time: body.startTime || new Date(Date.now() + 60 * 60 * 1000).toISOString(),\n      end_time: body.endTime || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()\n    });\n\n    const creative = await createAdCreative({\n      name: body.creativeName || 'Travel Creative',\n      object_story_spec: {\n        page_id: process.env.META_PAGE_ID,\n        link_data: {\n          message: body.message || 'Explore your next travel package today.',\n          link: body.link || process.env.APP_BASE_URL,\n          name: body.headline || 'Book Your Dream Trip',\n          description: body.description || 'Travel deals for couples, families and luxury travelers.'\n        }\n      }\n    });\n\n    const ad = await createAd({\n      name: body.adName || 'Travel Ad 1',\n      adset_id: adset.id,\n      creative: { creative_id: creative.id },\n      status: 'PAUSED'\n    });\n\n    return NextResponse.json({ ok: true, campaign, adset, creative, ad });\n  } catch (error) {\n    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });\n  }\n}\n",
+        "src/app/api/meta/insights/route.js": "import { NextResponse } from 'next/server';\nimport { getInsights } from '../../../../lib/meta';\nimport { summarizeInsights } from '../../../../services/reporting';\n\nexport async function GET() {\n  try {\n    const raw = await getInsights({\n      level: 'adset',\n      fields: 'campaign_name,adset_name,adset_id,spend,clicks,cpc,ctr,reach,impressions,actions,purchase_roas'\n    });\n\n    return NextResponse.json({ ok: true, raw, summary: summarizeInsights(raw.data || []) });\n  } catch (error) {\n    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });\n  }\n}\n",
+        "src/app/api/meta/optimize/route.js": "import { NextResponse } from 'next/server';\nimport { getInsights, updateAdSetStatus } from '../../../../lib/meta';\nimport { getOptimizerActions } from '../../../../services/reporting';\n\nexport async function GET() {\n  try {\n    const targetCpa = Number(process.env.OPTIMIZER_TARGET_CPA || 6);\n    const minRoas = Number(process.env.OPTIMIZER_MIN_ROAS || 2.5);\n\n    const raw = await getInsights({\n      level: 'adset',\n      fields: 'campaign_name,adset_name,adset_id,spend,clicks,cpc,ctr,reach,impressions,actions,purchase_roas'\n    });\n\n    const actions = getOptimizerActions(raw.data || [], targetCpa, minRoas);\n\n    const applied = [];\n    for (const action of actions) {\n      if (action.action === 'PAUSE') {\n        const res = await updateAdSetStatus(action.adsetId, 'PAUSED');\n        applied.push({ ...action, api: res });\n      } else {\n        applied.push(action);\n      }\n    }\n\n    return NextResponse.json({ ok: true, targetCpa, minRoas, actions: applied });\n  } catch (error) {\n    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });\n  }\n}\n",
+        "scripts/seed-demo-users.mjs": "import mongoose from 'mongoose';\n\nconst MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/fb_travel_bot';\nawait mongoose.connect(MONGODB_URI);\n\nconst UserSchema = new mongoose.Schema({}, { strict: false, collection: 'users' });\nconst User = mongoose.model('SeedUser', UserSchema);\n\nawait User.insertMany([\n  { email: 'amal@example.com', phone: '94771234567', firstName: 'Amal', lastName: 'Perera', packageType: 'honeymoon', destinationInterest: 'Bali', totalValue: 1200, leadStatus: 'qualified', lastActivityAt: new Date() },\n  { email: 'nisha@example.com', phone: '94772223344', firstName: 'Nisha', lastName: 'Fernando', packageType: 'family', destinationInterest: 'Dubai', totalValue: 300, leadStatus: 'abandoned', lastActivityAt: new Date(Date.now() - 10 * 86400000) },\n  { email: 'kasun@example.com', phone: '94775556677', firstName: 'Kasun', lastName: 'Silva', packageType: 'luxury', destinationInterest: 'Maldives', totalValue: 2500, leadStatus: 'customer', lastActivityAt: new Date(Date.now() - 2 * 86400000) }\n]);\n\nconsole.log('Seeded demo users');\nawait mongoose.disconnect();\n",
+        "scripts/run-optimizer.mjs": "const baseUrl = process.env.APP_BASE_URL || 'http://localhost:3000';\nconst res = await fetch(`${baseUrl}/api/meta/optimize`);\nconst data = await res.json();\nconsole.log(JSON.stringify(data, null, 2));\n",
+        "requests_examples.json": "{\n  \"trackLead\": {\n    \"method\": \"POST\",\n    \"url\": \"/api/meta/track\",\n    \"body\": {\n      \"eventName\": \"Lead\",\n      \"email\": \"lead@example.com\",\n      \"phone\": \"94770000000\",\n      \"firstName\": \"Saman\",\n      \"lastName\": \"Jay\",\n      \"destination\": \"Bali\",\n      \"packageType\": \"honeymoon\",\n      \"value\": 25,\n      \"sourceUrl\": \"http://localhost:3000/packages/bali-honeymoon\"\n    }\n  },\n  \"syncHotAudience\": {\n    \"method\": \"POST\",\n    \"url\": \"/api/meta/sync-audience\",\n    \"body\": {\n      \"segment\": \"hot\",\n      \"audi enceName\": \"Travel Audience - Hot\"\n    }\n  },\n  \"createCampaign\": {\n    \"method\": \"POST\",\n    \"url\": \"/api/meta/create-campaign\",\n    \"body\": {\n      \"campaignName\": \"Travel Sales - Broad\",\n      \"adsetName\": \"Broad LK 21-55\",\n      \"targetingKey\": \"broad_lk_21_55\",\n      \"dailyBudget\": 2000,\n      \"message\": \"Book your dream holiday today\",\n      \"headline\": \"Sri Lanka Travel Deals\",\n      \"description\": \"Packages for couples, families and luxury travelers\",\n      \"link\": \"http://localhost:3000\"\n    }\n  }\n}"
+    },
+    "ready_api_endpoints": [
+        {
+            "path": "/api/meta/health",
+            "method": "GET",
+            "purpose": "health check"
+        },
+        {
+            "path": "/api/meta/track",
+            "method": "POST",
+            "purpose": "save event in DB and send Conversions API event"
+        },
+        {
+            "path": "/api/meta/sync-audience",
+            "method": "POST",
+            "purpose": "create custom audience and upload hashed users"
+        },
+        {
+            "path": "/api/meta/create-campaign",
+            "method": "POST",
+            "purpose": "create campaign, adset, creative and ad"
+        },
+        {
+            "path": "/api/meta/insights",
+            "method": "GET",
+            "purpose": "pull adset insights summary"
+        },
+        {
+            "path": "/api/meta/optimize",
+            "method": "GET",
+            "purpose": "pause weak adsets using simple thresholds"
+        }
+    ],
+    "real_targeting_configs": {
+        "note_si": "Interest IDs saha targeting availability account, country, special categories saha Meta policy anuwa wenas wenna puluwan. Me keys ready templates widihata dunnata, run karanna kalin Ads Manager / targeting validation ekin check karanna.",
+        "configs": [
+            {
+                "key": "broad_lk_21_55",
+                "use_case": "cold start broad prospecting",
+                "targeting": {
+                    "geo_locations": {
+                        "countries": [
+                            "LK"
+                        ]
+                    },
+                    "age_min": 21,
+                    "age_max": 55,
+                    "locales": [
+                        1000
+                    ]
+                }
+            },
+            {
+                "key": "honeymoon_lk",
+                "use_case": "honeymoon packages",
+                "targeting": {
+                    "geo_locations": {
+                        "countries": [
+                            "LK"
+                        ]
+                    },
+                    "age_min": 23,
+                    "age_max": 40,
+                    "flexible_spec": [
+                        {
+                            "interests": [
+                                {
+                                    "id": "6003139266461",
+                                    "name": "Travel"
+                                },
+                                {
+                                    "id": "6003349442621",
+                                    "name": "Air travel"
+                                },
+                                {
+                                    "id": "6003679657841",
+                                    "name": "Honeymoon"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "key": "family_travel_lk",
+                "use_case": "family holiday packages",
+                "targeting": {
+                    "geo_locations": {
+                        "countries": [
+                            "LK"
+                        ]
+                    },
+                    "age_min": 28,
+                    "age_max": 50,
+                    "flexible_spec": [
+                        {
+                            "interests": [
+                                {
+                                    "id": "6003139266461",
+                                    "name": "Travel"
+                                },
+                                {
+                                    "id": "6003455668141",
+                                    "name": "Hotels"
+                                },
+                                {
+                                    "id": "6003349442621",
+                                    "name": "Air travel"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "key": "luxury_travel_lk",
+                "use_case": "premium packages",
+                "targeting": {
+                    "geo_locations": {
+                        "countries": [
+                            "LK"
+                        ]
+                    },
+                    "age_min": 25,
+                    "age_max": 55,
+                    "flexible_spec": [
+                        {
+                            "interests": [
+                                {
+                                    "id": "6003139266461",
+                                    "name": "Travel"
+                                },
+                                {
+                                    "id": "6003455668141",
+                                    "name": "Hotels"
+                                },
+                                {
+                                    "id": "6003107902433",
+                                    "name": "Luxury goods"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ]
+    },
+    "important_notes": [
+        "Meta tokens, permissions, page id, billing setup nathnam ad creation fail wenna puluwan.",
+        "Custom audience upload data hashed format eke yanna one.",
+        "Lead, Purchase, Search, ViewContent wage events high-quality widihata send karanna.",
+        "No-code certainty 95% guarantee karanna behe; me system eka signal quality saha automation walin ROI improve karanna hadapu foundation ekak."
+    ]
+}

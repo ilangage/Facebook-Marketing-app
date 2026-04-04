@@ -1,0 +1,483 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "document": "travel-roi-meta-bot-backend",
+  "version": "1.2.0",
+  "title": "Travel ROI Meta Ads Bot — Complete Backend Specification",
+  "goal": {
+    "north_star": "qualified_booking_roas",
+    "primary_kpis": [
+      "roas",
+      "qualified_cpl",
+      "booking_rate",
+      "revenue_per_lead"
+    ]
+  },
+  "runtime": {
+    "language": "JavaScript",
+    "module_type": "ESM",
+    "entry_file": "server/index.js",
+    "start_command": "npm run dev:api",
+    "default_port": 3001
+  },
+  "environment_variables": {
+    "required_for_live_meta": [
+      "META_ACCESS_TOKEN",
+      "META_AD_ACCOUNT_ID",
+      "META_PAGE_ID"
+    ],
+    "security": [
+      "API_KEY",
+      "CORS_ORIGINS",
+      "MAX_BODY_BYTES"
+    ],
+    "automation": [
+      "META_AUTO_PUBLISH",
+      "LOOP_APPLY_META",
+      "LOOP_APPLY_SCALE"
+    ]
+  },
+  "modes": {
+    "mock": "META_USE_MOCK=true or Meta credentials missing",
+    "live": "Token + act_ ad account set"
+  },
+  "persistence": {
+    "engine_store_file": "data/bot-state.json",
+    "entities": [
+      "jobs",
+      "decisions",
+      "crmLog",
+      "funnel",
+      "trackingHealth",
+      "metaCampaigns",
+      "performanceByAdset",
+      "revenueEvents",
+      "crmQualityEvents"
+    ]
+  },
+  "modules": {
+    "server/index.js": "Routes + security middleware + dashboard payload",
+    "server/meta-graph.js": "Meta Graph client + campaign chain rollback + budget/status mutators",
+    "server/orchestrator.js": "Idempotent pipeline run + campaign persistence",
+    "server/loop-engine.js": "Decision loop + optional live Meta PAUSE/SCALE apply",
+    "server/engine-store.js": "Persistent store + business metrics aggregation",
+    "server/insights-sync.js": "Insights reconciliation to campaign/perf state",
+    "server/ad-preview.js": "Ad preview model"
+  },
+  "http_routes": [
+    {
+      "method": "GET",
+      "path": "/api/dashboard/state",
+      "description": "Dashboard payload including business summary and engine snapshot"
+    },
+    {
+      "method": "GET",
+      "path": "/api/meta/health"
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy"
+    },
+    {
+      "method": "GET",
+      "path": "/api/meta/insights",
+      "description": "Live insights pull + reconcile + performance sample persist"
+    },
+    {
+      "method": "GET",
+      "path": "/api/business/summary"
+    },
+    {
+      "method": "POST",
+      "path": "/api/pipeline/run",
+      "body_schema": "PipelineRunRequest"
+    },
+    {
+      "method": "POST",
+      "path": "/api/meta/create-campaign",
+      "body_schema": "CreateCampaignRequest"
+    },
+    {
+      "method": "POST",
+      "path": "/api/meta/create-creative",
+      "body_schema": "CreateCreativeRequest"
+    },
+    {
+      "method": "POST",
+      "path": "/api/meta/upload-image"
+    },
+    {
+      "method": "POST",
+      "path": "/api/meta/upload-video"
+    },
+    {
+      "method": "POST",
+      "path": "/api/meta/optimize",
+      "description": "Runs loop tick (decision + optional live actions)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/loop/tick"
+    },
+    {
+      "method": "POST",
+      "path": "/api/meta/track"
+    },
+    {
+      "method": "POST",
+      "path": "/api/crm/webhook"
+    },
+    {
+      "method": "POST",
+      "path": "/api/crm/quality",
+      "body_schema": "CrmQualityEvent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/revenue/record",
+      "body_schema": "RevenueEvent"
+    },
+    {
+      "method": "POST",
+      "path": "/api/preview/render",
+      "body_schema": "PreviewRenderRequest"
+    }
+  ],
+  "security": {
+    "write_auth": "All POST routes require X-API-Key when API_KEY is configured",
+    "cors": "Allowlist via CORS_ORIGINS",
+    "body_limit": "MAX_BODY_BYTES"
+  },
+  "continuous_loop": {
+    "scheduler": "node-cron",
+    "manual_tick": "/api/loop/tick",
+    "live_pause_apply_env": "LOOP_APPLY_META",
+    "live_scale_apply_env": "LOOP_APPLY_SCALE"
+  },
+  "schemas": {
+    "CarouselCard": {
+      "type": "object",
+      "required": [
+        "headline"
+      ],
+      "properties": {
+        "headline": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "link": {
+          "type": "string",
+          "format": "uri"
+        },
+        "imageHash": {
+          "type": "string"
+        },
+        "imageUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "CreateCreativeRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "link": {
+          "type": "string",
+          "format": "uri"
+        },
+        "message": {
+          "type": "string"
+        },
+        "headline": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "imageHash": {
+          "type": "string"
+        },
+        "videoId": {
+          "type": "string"
+        },
+        "carouselCards": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/schemas/CarouselCard"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "imageHash"
+          ]
+        },
+        {
+          "required": [
+            "videoId"
+          ]
+        },
+        {
+          "required": [
+            "carouselCards"
+          ]
+        }
+      ]
+    },
+    "PipelineRunRequest": {
+      "type": "object",
+      "properties": {
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "image",
+            "video",
+            "carousel"
+          ]
+        },
+        "campaignName": {
+          "type": "string"
+        },
+        "adsetName": {
+          "type": "string"
+        },
+        "dailyBudget": {
+          "type": "number",
+          "minimum": 0.0001
+        },
+        "targeting": {
+          "type": "object"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "optimizationGoal": {
+          "type": "string"
+        },
+        "customEventType": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "headline": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "link": {
+          "type": "string",
+          "format": "uri"
+        },
+        "imageHash": {
+          "type": "string"
+        },
+        "videoId": {
+          "type": "string"
+        },
+        "imageUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "file_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "fileUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "carouselCards": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/schemas/CarouselCard"
+          }
+        },
+        "autoPublish": {
+          "type": "boolean"
+        },
+        "expectedLeads": {
+          "type": "number"
+        },
+        "expectedRoas": {
+          "type": "number"
+        },
+        "expectedRevenuePerLead": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string"
+        }
+      }
+    },
+    "CreateCampaignRequest": {
+      "allOf": [
+        {
+          "$ref": "#/schemas/PipelineRunRequest"
+        }
+      ]
+    },
+    "CrmQualityEvent": {
+      "type": "object",
+      "required": [
+        "leadId",
+        "metaAdsetId"
+      ],
+      "properties": {
+        "leadId": {
+          "type": "string"
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "hot",
+            "warm",
+            "cold",
+            "junk"
+          ]
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "metaCampaignId": {
+          "type": "string"
+        },
+        "metaAdsetId": {
+          "type": "string"
+        },
+        "campaignName": {
+          "type": "string"
+        },
+        "adsetName": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "RevenueEvent": {
+      "type": "object",
+      "required": [
+        "orderId",
+        "revenue",
+        "metaAdsetId"
+      ],
+      "properties": {
+        "orderId": {
+          "type": "string"
+        },
+        "revenue": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "currency": {
+          "type": "string"
+        },
+        "leadId": {
+          "type": "string"
+        },
+        "metaCampaignId": {
+          "type": "string"
+        },
+        "metaAdsetId": {
+          "type": "string"
+        },
+        "campaignName": {
+          "type": "string"
+        },
+        "adsetName": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "bookedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "PreviewRenderRequest": {
+      "type": "object",
+      "properties": {
+        "pageName": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "image",
+            "video",
+            "carousel"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "headline": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "link": {
+          "type": "string",
+          "format": "uri"
+        },
+        "cta": {
+          "type": "string"
+        },
+        "imageUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "file_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "carouselCards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/schemas/CarouselCard"
+          }
+        }
+      }
+    }
+  },
+  "expected_results": {
+    "can_publish": true,
+    "can_monitor": true,
+    "can_optimize": true,
+    "can_scale": true,
+    "can_measure_revenue_roas": true
+  },
+  "file_locations": {
+    "blueprint_this_file": "travel-roi-meta-bot-backend.json",
+    "env_example": ".env.example",
+    "legacy_public_spec": "public/fb-travel-marketing-bot.json"
+  }
+}

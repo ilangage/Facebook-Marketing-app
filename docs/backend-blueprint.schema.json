@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/travel-roi-meta-bot/backend-blueprint",
+  "title": "Travel ROI Meta Bot — Backend Blueprint",
+  "version": "1.0.0",
+  "generatedFor": "my-project server (Node ESM)",
+  "entrypoint": "server/index.js",
+  "runtime": {
+    "module": "ESM",
+    "sqliteDriver": "node:sqlite",
+    "sqliteExperimental": true
+  },
+  "persistence": {
+    "engineDatabase": {
+      "kind": "sqlite",
+      "defaultPath": "data/bot-engine.db",
+      "pathEnv": "ENGINE_DB_PATH",
+      "pragma": ["journal_mode=WAL", "foreign_keys=ON"],
+      "legacyImport": {
+        "file": "data/bot-state.json",
+        "when": "Empty engine tables on first boot; one-time merge into SQLite"
+      }
+    }
+  },
+  "databaseSchema": {
+    "migrationsTable": "schema_migrations",
+    "versions": [1],
+    "tables": [
+      {
+        "name": "schema_migrations",
+        "primaryKey": ["version"],
+        "columns": [
+          { "name": "version", "type": "INTEGER", "constraints": "PRIMARY KEY" }
+        ]
+      },
+      {
+        "name": "engine_funnel",
+        "primaryKey": ["id"],
+        "rowCardinality": "single",
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY CHECK (id = 1)" },
+          { "name": "view_content", "type": "INTEGER", "default": 0 },
+          { "name": "lead_count", "type": "INTEGER", "default": 0 },
+          { "name": "qualified", "type": "INTEGER", "default": 0 },
+          { "name": "booking", "type": "INTEGER", "default": 0 }
+        ]
+      },
+      {
+        "name": "engine_settings",
+        "primaryKey": ["id"],
+        "rowCardinality": "single",
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY CHECK (id = 1)" },
+          { "name": "tracking_health", "type": "REAL", "default": 0.85 }
+        ]
+      },
+      {
+        "name": "engine_jobs",
+        "primaryKey": ["id"],
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT" },
+          { "name": "job_json", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ],
+        "retentionNote": "Capped ~200 newest rows in application layer"
+      },
+      {
+        "name": "engine_decisions",
+        "primaryKey": ["id"],
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT" },
+          { "name": "decision_json", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ],
+        "retentionNote": "Capped ~300"
+      },
+      {
+        "name": "engine_crm_log",
+        "primaryKey": ["id"],
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT" },
+          { "name": "log_json", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ],
+        "retentionNote": "Capped ~500"
+      },
+      {
+        "name": "engine_meta_campaigns",
+        "primaryKey": ["campaign_name", "adset_name"],
+        "columns": [
+          { "name": "campaign_name", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "adset_name", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "meta_campaign_id", "type": "TEXT" },
+          { "name": "meta_adset_id", "type": "TEXT" },
+          { "name": "meta_ad_id", "type": "TEXT" },
+          { "name": "meta_creative_id", "type": "TEXT" },
+          { "name": "updated_at", "type": "TEXT", "constraints": "NOT NULL" }
+        ]
+      },
+      {
+        "name": "engine_performance",
+        "primaryKey": ["meta_adset_id"],
+        "columns": [
+          { "name": "meta_adset_id", "type": "TEXT", "constraints": "PRIMARY KEY" },
+          { "name": "meta_campaign_id", "type": "TEXT" },
+          { "name": "campaign_name", "type": "TEXT" },
+          { "name": "adset_name", "type": "TEXT" },
+          { "name": "spend", "type": "REAL", "default": 0 },
+          { "name": "clicks", "type": "INTEGER", "default": 0 },
+          { "name": "impressions", "type": "INTEGER", "default": 0 },
+          { "name": "leads", "type": "INTEGER", "default": 0 },
+          { "name": "qualified_leads", "type": "INTEGER", "default": 0 },
+          { "name": "bookings", "type": "INTEGER", "default": 0 },
+          { "name": "revenue", "type": "REAL", "default": 0 },
+          { "name": "cogs", "type": "REAL", "default": 0 },
+          { "name": "currency", "type": "TEXT", "default": "'USD'" },
+          { "name": "updated_at", "type": "TEXT" }
+        ]
+      },
+      {
+        "name": "engine_revenue_events",
+        "primaryKey": ["order_id"],
+        "columns": [
+          { "name": "order_id", "type": "TEXT", "constraints": "PRIMARY KEY" },
+          { "name": "event_json", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ],
+        "retentionNote": "Capped ~1000 in application layer"
+      },
+      {
+        "name": "engine_crm_quality",
+        "primaryKey": ["id"],
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT" },
+          { "name": "event_json", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ],
+        "retentionNote": "Capped ~3000"
+      },
+      {
+        "name": "engine_capi_log",
+        "primaryKey": ["id"],
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT" },
+          { "name": "event_id", "type": "TEXT" },
+          { "name": "event_name", "type": "TEXT" },
+          { "name": "pixel_id", "type": "TEXT" },
+          { "name": "http_status", "type": "INTEGER" },
+          { "name": "response_json", "type": "TEXT" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ]
+      },
+      {
+        "name": "engine_scale_history",
+        "primaryKey": ["meta_adset_id"],
+        "columns": [
+          { "name": "meta_adset_id", "type": "TEXT", "constraints": "PRIMARY KEY" },
+          { "name": "last_scaled_at", "type": "TEXT", "constraints": "NOT NULL" },
+          { "name": "last_budget_minor", "type": "INTEGER" }
+        ]
+      },
+      {
+        "name": "engine_audience_sync",
+        "primaryKey": ["id"],
+        "columns": [
+          { "name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT" },
+          { "name": "segment", "type": "TEXT" },
+          { "name": "audience_id", "type": "TEXT" },
+          { "name": "matched_users", "type": "INTEGER" },
+          { "name": "detail_json", "type": "TEXT" },
+          { "name": "created_at", "type": "TEXT", "default": "datetime('now')" }
+        ]
+      }
+    ]
+  },
+  "httpApi": {
+    "baseUrlDefault": "http://localhost:3001",
+    "portEnv": "API_PORT",
+    "cors": {
+      "allowlistEnv": "CORS_ORIGINS",
+      "defaultOrigins": ["http://localhost:5173", "http://localhost:5174"]
+    },
+    "security": {
+      "postApiKeyHeader": "X-API-Key",
+      "apiKeyEnv": "API_KEY",
+      "maxBodyBytesEnv": "MAX_BODY_BYTES",
+      "rateLimit": {
+        "perIpPerMinuteEnv": "RATE_LIMIT_MAX_PER_MIN",
+        "default": 120
+      },
+      "crmWebhook": {
+        "secretEnv": "CRM_WEBHOOK_SECRET",
+        "signatureHeader": "X-Webhook-Signature",
+        "format": "sha256=<hex_hmac_of_raw_body>"
+      }
+    },
+    "routes": [
+      { "method": "GET", "path": "/api/dashboard/state", "auth": false, "persisted": false },
+      { "method": "GET", "path": "/api/meta/health", "auth": false },
+      { "method": "POST", "path": "/api/meta/track", "auth": true },
+      { "method": "POST", "path": "/api/pipeline/run", "auth": true },
+      { "method": "POST", "path": "/api/preview/render", "auth": true },
+      { "method": "POST", "path": "/api/loop/tick", "auth": true },
+      { "method": "GET", "path": "/api/content/video-script", "auth": false, "query": ["persona", "destination", "offer"] },
+      { "method": "GET", "path": "/api/policy", "auth": false },
+      { "method": "GET", "path": "/api/business/summary", "auth": false },
+      { "method": "POST", "path": "/api/meta/upload-image", "auth": true },
+      { "method": "POST", "path": "/api/meta/upload-video", "auth": true },
+      { "method": "POST", "path": "/api/meta/create-creative", "auth": true },
+      { "method": "POST", "path": "/api/meta/create-campaign", "auth": true },
+      { "method": "POST", "path": "/api/meta/sync-audience", "auth": true },
+      { "method": "POST", "path": "/api/meta/capi/event", "auth": true },
+      { "method": "GET", "path": "/api/meta/capi/log", "auth": false, "query": ["limit"] },
+      { "method": "GET", "path": "/api/meta/insights", "auth": false },
+      { "method": "POST", "path": "/api/meta/optimize", "auth": true },
+      { "method": "POST", "path": "/api/crm/webhook", "auth": true },
+      { "method": "POST", "path": "/api/crm/quality", "auth": true },
+      { "method": "POST", "path": "/api/revenue/record", "auth": true },
+      { "method": "POST", "path": "/api/revenue/refund", "auth": true }
+    ],
+    "note": "auth=true means API_KEY required when API_KEY env is non-empty; rate limit applies to all POST"
+  },
+  "externalMeta": {
+    "marketingApi": {
+      "module": "server/meta-graph.js",
+      "baseUrlPattern": "https://graph.facebook.com/{META_API_VERSION}",
+      "requiredForLive": ["META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID"],
+      "commonEnv": [
+        "META_API_VERSION",
+        "META_ACCESS_TOKEN",
+        "META_AD_ACCOUNT_ID",
+        "META_PAGE_ID",
+        "META_PIXEL_ID",
+        "APP_BASE_URL",
+        "META_DEFAULT_OBJECTIVE",
+        "META_DEFAULT_OPTIMIZATION_GOAL",
+        "META_CUSTOM_EVENT_TYPE",
+        "META_AUTO_PUBLISH",
+        "META_USE_MOCK"
+      ]
+    },
+    "customAudiences": {
+      "module": "server/meta-audience.js",
+      "operations": ["createCustomAudience", "addUsersToCustomAudience"],
+      "emailHashing": "SHA-256 of normalized lowercase trim (Meta EMAIL schema)"
+    },
+    "conversionsApi": {
+      "module": "server/meta-capi.js",
+      "endpointPattern": "POST https://graph.facebook.com/{META_API_VERSION}/{META_PIXEL_ID}/events",
+      "dedupField": "event_id"
+    }
+  },
+  "loopAndOptimizer": {
+    "module": "server/loop-engine.js",
+    "scheduler": "server/scheduler.js",
+    "env": [
+      "LOOP_APPLY_META",
+      "LOOP_APPLY_SCALE",
+      "LOOP_SCALE_MIN_MINOR",
+      "LOOP_SCALE_MAX_MINOR",
+      "LOOP_SCALE_PERCENT",
+      "LOOP_SCALE_COOLDOWN_MS",
+      "CRON_SCHEDULE",
+      "CRON_ENABLE",
+      "MARGIN_AWARE_OPTIMIZER",
+      "OPTIMIZER_CPA_MAX",
+      "OPTIMIZER_ROAS_MIN",
+      "OPTIMIZER_PROFIT_ROAS_MIN",
+      "OPTIMIZER_MIN_LEADS_SCALE"
+    ]
+  },
+  "inMemoryState": {
+    "module": "server/state.js",
+    "description": "Dashboard/demo campaigns, creatives, audiences, assets — not all persisted to SQLite",
+    "keyRoots": ["project", "kpis", "campaigns", "creatives", "audiences", "crmEvents", "optimizerActions", "tracking", "assets", "cronJobs", "targeting", "lastAdPreview"]
+  },
+  "serverModules": [
+    { "path": "server/index.js", "role": "HTTP server, routing" },
+    { "path": "server/state.js", "role": "In-memory state + recalculateActions" },
+    { "path": "server/engine-store.js", "role": "SQLite persistence facade" },
+    { "path": "server/db/sqlite.js", "role": "DB connection + migrations + CAPI log helpers" },
+    { "path": "server/meta-graph.js", "role": "Marketing API Graph helpers" },
+    { "path": "server/meta-audience.js", "role": "Custom Audiences" },
+    { "path": "server/meta-capi.js", "role": "Conversions API + log" },
+    { "path": "server/loop-engine.js", "role": "Optimizer loop + Meta pause/scale" },
+    { "path": "server/orchestrator.js", "role": "Ad pipeline + jobs" },
+    { "path": "server/insights-sync.js", "role": "Insights reconciliation" },
+    { "path": "server/policy.js", "role": "Publish policy" },
+    { "path": "server/scheduler.js", "role": "Cron" },
+    { "path": "server/scaling-config.js", "role": "Budget clamp config" },
+    { "path": "server/rate-limit.js", "role": "POST rate limiting" },
+    { "path": "server/webhook-verify.js", "role": "CRM HMAC verification" }
+  ],
+  "requestBodiesReference": {
+    "/api/meta/capi/event": {
+      "eventName": "string",
+      "eventId": "string optional dedup",
+      "eventTime": "number unix seconds optional",
+      "eventSourceUrl": "string optional",
+      "customData": "object optional",
+      "userData": "object optional hashed per Meta",
+      "actionSource": "string optional default website"
+    },
+    "/api/meta/sync-audience": {
+      "segment": "string",
+      "audienceName": "string optional",
+      "audienceId": "string optional existing CA id",
+      "emails": "string[] required for live hashed upload"
+    },
+    "/api/revenue/refund": {
+      "orderId": "string required",
+      "refundAmount": "number required",
+      "refundCogs": "number optional",
+      "cancelBooking": "boolean optional default true subtracts one booking"
+    },
+    "/api/revenue/record": {
+      "orderId": "string required",
+      "revenue": "number required",
+      "cogs": "number optional",
+      "currency": "string",
+      "metaAdsetId": "string required",
+      "metaCampaignId": "string",
+      "leadId": "string",
+      "bookedAt": "string",
+      "source": "string"
+    }
+  },
+  "tests": {
+    "command": "npm run test",
+    "runner": "vitest",
+    "patterns": ["server/**/*.test.js"]
+  }
+}
