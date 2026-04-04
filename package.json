@@ -10,6 +10,7 @@
     "dev": "vite",
     "dev:ui": "vite",
     "dev:api": "node --disable-warning=ExperimentalWarning server/index.js",
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev:all": "concurrently -n ui,api -c cyan,magenta \"npm run dev\" \"npm run dev:api\"",
     "build": "vite build",
     "preview": "vite preview",

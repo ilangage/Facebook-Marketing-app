@@ -40,6 +40,16 @@ npm run preview   # optional: preview production build
 npm test
 ```
 
+## Deploy API (e.g. Render)
+
+- **Build command:** `npm install`
+- **Start command:** `npm start` (or `npm run dev:api`)
+- **Port:** the server listens on **`PORT`** (Render injects this) or **`API_PORT`** / `3001` locally.
+- **Environment:** set **`META_*`** and other vars from `.env.example`. Add **`CORS_ORIGINS`** with your Vercel app URL (e.g. `https://your-app.vercel.app`) so the browser can call the API.
+- **`API_KEY`:** recommended in production. On Render, the app boots without it but logs a warning; set `API_KEY` in the Render dashboard when ready.
+
+**Vercel (UI):** set **`VITE_API_BASE`** to your Render service URL (`https://…onrender.com`), then redeploy.
+
 ## Security
 
 - Never commit `.env` (gitignored). Copy from `.env.example` and fill secrets locally.

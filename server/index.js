@@ -45,7 +45,8 @@ import { sendCapiEvent, listRecentCapiEvents } from "./meta-capi.js";
 import { rateLimitCheck, clientKeyFromReq } from "./rate-limit.js";
 import { verifyCrmWebhookSignature } from "./webhook-verify.js";
 
-const PORT = Number(process.env.API_PORT || 3001);
+/** Render/Fly/etc. inject `PORT`; local dev often uses `API_PORT` (default 3001). */
+const PORT = Number(process.env.PORT || process.env.API_PORT || 3001);
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1024 * 1024);
 const API_KEY = process.env.API_KEY || "";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://localhost:5174")
@@ -899,15 +900,22 @@ function createServer() {
 const server = createServer();
 
 async function boot() {
-  if (
+  const prodNeedsKey =
     process.env.NODE_ENV === "production" &&
     !API_KEY &&
-    process.env.ALLOW_UNAUTHENTICATED_POSTS !== "true"
-  ) {
+    process.env.ALLOW_UNAUTHENTICATED_POSTS !== "true";
+  /** Render sets RENDER=true; allow first deploy without API_KEY but warn (set API_KEY in dashboard for real traffic). */
+  const onRender = process.env.RENDER === "true";
+  if (prodNeedsKey && !onRender) {
     console.error(
       "Refusing to start: NODE_ENV=production requires API_KEY. Set API_KEY or ALLOW_UNAUTHENTICATED_POSTS=true (not recommended)."
     );
     process.exit(1);
+  }
+  if (prodNeedsKey && onRender) {
+    console.warn(
+      "Render: API_KEY not set — POST routes accept requests without X-API-Key. Set API_KEY in Environment for production."
+    );
   }
   await initEngineStore();
   hydrateMetaStateFromPersisted();
