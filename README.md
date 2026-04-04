@@ -44,3 +44,22 @@ npm test
 
 - Never commit `.env` (gitignored). Copy from `.env.example` and fill secrets locally.
 - Rotate Meta tokens if they were ever exposed.
+
+## Push to GitHub
+
+If this repo is not linked yet, add your **GitHub username** and remote, then push:
+
+```bash
+git remote add origin https://github.com/YOUR_GITHUB_USERNAME/Facebook-Marketing-app.git
+git branch -M main
+git push -u origin main
+```
+
+If `origin` already exists with a wrong URL:
+
+```bash
+git remote set-url origin https://github.com/YOUR_GITHUB_USERNAME/Facebook-Marketing-app.git
+git push -u origin main
+```
+
+Use a [Personal Access Token](https://github.com/settings/tokens) as the password when Git asks (HTTPS), or use SSH: `git@github.com:YOUR_USERNAME/Facebook-Marketing-app.git`.
