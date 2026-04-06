@@ -25,7 +25,9 @@ npm run dev:api
 npm run dev
 ```
 
-Or both: `npm run dev:all`
+Or both: `npm run dev:all` (recommended — UI + API together).
+
+If the API says a port is busy, it will try the next port in **development**; set **`VITE_API_BASE`** in `.env` to `http://localhost:<that port>` so the UI can reach it.
 
 ## Build
 

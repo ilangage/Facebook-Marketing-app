@@ -73,6 +73,23 @@ body {
   font-size: 14px;
 }
 
+.sidebar-legal {
+  margin: 20px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.sidebar-legal a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.sidebar-legal a:hover {
+  color: var(--brand);
+  text-decoration: underline;
+}
+
 .nav-item:hover,
 .nav-item.active {
   color: var(--text);

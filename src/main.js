@@ -1,5 +1,14 @@
 import "./style.css";
 
+/** If the SPA shell loads for a legal URL (e.g. dev server serves `/` for `/privacy`), load the static HTML under public (privacy, terms, data-deletion). */
+(function redirectLegalStaticHtml() {
+  if (typeof document === "undefined") return;
+  const path = location.pathname.replace(/\/$/, "");
+  if (path !== "/privacy" && path !== "/terms" && path !== "/data-deletion") return;
+  if (location.pathname.includes("index.html")) return;
+  location.replace(path + "/index.html" + location.search + location.hash);
+})();
+
 /** First ISO2 from comma/space-separated list; fallback LK (matches ad set geo fallback). */
 function firstCountryFromCsv(csv) {
   const codes = String(csv || "")
@@ -664,6 +673,11 @@ function render() {
           <button type="button" class="nav-item ${appState.activeView === "optimizer" ? "active" : ""}" data-view="optimizer">Optimizer</button>
           <button type="button" class="nav-item ${appState.activeView === "automation" ? "active" : ""}" data-view="automation">Automation</button>
         </nav>
+        <p class="sidebar-legal">
+          <a href="/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a><br />
+          <a href="/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a><br />
+          <a href="/data-deletion" target="_blank" rel="noopener noreferrer">Data deletion</a>
+        </p>
       </aside>
       <main class="workspace">
         <header class="topbar">

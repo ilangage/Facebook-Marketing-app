@@ -922,22 +922,54 @@ async function boot() {
   if (process.env.NODE_ENV !== "production" && !API_KEY) {
     console.warn("Dev mode: API_KEY unset — POST routes are open.");
   }
-  server.listen(PORT, () => {
-    console.log(`Bot backend running on http://localhost:${PORT}`);
-    console.log(`Meta mode: ${useMockMeta() ? "MOCK (set META_ACCESS_TOKEN + META_AD_ACCOUNT_ID for live)" : "LIVE"}`);
-    console.log(`Engine DB: ${process.env.ENGINE_DB_PATH || "data/bot-engine.db"}`);
-    startScheduler();
-  });
-  server.on("error", (err) => {
-    if (err.code === "EADDRINUSE") {
-      console.error(
-        `\nPort ${PORT} is already in use (another dev:api is probably running).\n\nFix:\n  • Stop the other terminal, or\n  • Kill it: kill $(lsof -ti :${PORT})\n  • Or use another port: API_PORT=3002 npm run dev:api\n`
-      );
-    } else {
-      console.error(err);
+
+  let listenPort = PORT;
+  const maxDevPortTries = 10;
+  for (let attempt = 0; attempt < maxDevPortTries; attempt++) {
+    try {
+      await new Promise((resolve, reject) => {
+        const onErr = (err) => {
+          server.off("error", onErr);
+          reject(err);
+        };
+        server.once("error", onErr);
+        server.listen(listenPort, () => {
+          server.off("error", onErr);
+          resolve();
+        });
+      });
+      break;
+    } catch (err) {
+      if (
+        err?.code === "EADDRINUSE" &&
+        process.env.NODE_ENV !== "production" &&
+        attempt < maxDevPortTries - 1
+      ) {
+        await new Promise((resolve) => server.close(() => resolve()));
+        console.warn(
+          `Port ${listenPort} in use — trying ${listenPort + 1}. If the UI cannot connect, set VITE_API_BASE=http://localhost:${listenPort + 1} in .env`
+        );
+        listenPort += 1;
+        continue;
+      }
+      if (err?.code === "EADDRINUSE") {
+        console.error(
+          `\nPort ${listenPort} is already in use.\n\nFix:\n  • Stop the other process, or\n  • Kill: kill $(lsof -ti :${listenPort})\n  • Or set API_PORT=3002 npm run dev:api\n`
+        );
+      } else {
+        console.error(err);
+      }
+      process.exit(1);
     }
-    process.exit(1);
-  });
+  }
+
+  console.log(`Bot backend running on http://localhost:${listenPort}`);
+  console.log(`Meta mode: ${useMockMeta() ? "MOCK (set META_ACCESS_TOKEN + META_AD_ACCOUNT_ID for live)" : "LIVE"}`);
+  console.log(`Engine DB: ${process.env.ENGINE_DB_PATH || "data/bot-engine.db"}`);
+  if (listenPort !== PORT) {
+    console.warn(`Listening on ${listenPort} (requested ${PORT}). Match VITE_API_BASE in .env to http://localhost:${listenPort}`);
+  }
+  startScheduler();
 }
 
 boot();
