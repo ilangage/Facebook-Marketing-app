@@ -147,6 +147,12 @@ function runMigrations(db) {
           ON meta_targeting_catalog (search_type, search_q);
       `,
     },
+    {
+      version: 3,
+      sql: `
+        ALTER TABLE engine_settings ADD COLUMN last_insights_sync_at TEXT;
+      `,
+    },
   ];
   for (const m of migrations) {
     if (applied.has(m.version)) continue;

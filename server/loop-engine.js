@@ -4,6 +4,7 @@ import {
   applyPersistedPerformanceToState,
   getLastScaleAt,
   recordScaleHistory,
+  getInsightsFreshness,
 } from "./engine-store.js";
 import { isMetaConfigured, setObjectStatus, getAdsetById, updateAdsetDailyBudget } from "./meta-graph.js";
 import { getScalingConfig, clampBudgetMinor, getEffectiveScaleMultiplier } from "./scaling-config.js";
@@ -58,6 +59,16 @@ export async function runLoopTick() {
       row.status = "SCALE";
       if (live && applyScale && row.metaAdsetId) {
         try {
+          if (blockScaleOnStaleInsights() && getInsightsFreshness().stale) {
+            const fr = getInsightsFreshness();
+            metaResults.push({
+              adset: action.adset,
+              ok: false,
+              skipped: "stale_insights",
+              error: `Insights older than ${fr.maxAgeMs}ms — refresh GET /api/meta/insights before scale`,
+            });
+            continue;
+          }
           const cfg = getScalingConfig();
           const last = getLastScaleAt(row.metaAdsetId);
           if (cfg.cooldownMs > 0 && last && Date.now() - last < cfg.cooldownMs) {

@@ -2,7 +2,7 @@
  * Meta Conversions API (server-side) — proof + dedup via event_id.
  * @see https://developers.facebook.com/docs/marketing-api/conversions-api
  */
-import { getMetaConfig } from "./meta-graph.js";
+import { getMetaConfig, buildAppSecretProof } from "./meta-graph.js";
 import { getDb, logCapiResult, listCapiLog } from "./db/sqlite.js";
 import { recomputeTrackingHealthFromCapiLog } from "./engine-store.js";
 
@@ -51,6 +51,8 @@ export async function sendCapiEvent(opts = {}) {
 
   const url = new URL(`https://graph.facebook.com/${c.apiVersion}/${c.pixelId}/events`);
   url.searchParams.set("access_token", c.token);
+  const capiProof = buildAppSecretProof(c.token);
+  if (capiProof) url.searchParams.set("appsecret_proof", capiProof);
 
   const { res, data } = await fetchJsonWithTimeout(
     url.href,

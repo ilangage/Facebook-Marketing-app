@@ -50,7 +50,26 @@ const appState = {
   targetingSearchPicks: [],
   /** ISO2 for Meta targetingsearch `country_code` (audience scope). Syncs from first Audience targeting country on change. */
   targetingSearchCountry: "LK",
+  /** Last targeting-search diagnostics (empty results help). */
+  targetingSearchStats: null,
+  /** Persisted across renders — live Custom Audience emails (merged with VITE_AUDIENCE_SYNC_EMAILS). */
+  audienceSyncEmailsDraft: "",
+  /** 1–4: one ad set vs audience split test (same campaign + creative). */
+  multiAdsetCount: 1,
+  /** Per-slot name / optional country override / flexible_spec JSON when multiAdsetCount > 1. */
+  adsetSlots: [
+    { name: "Audience 1", countries: "", flexibleSpecJson: "" },
+    { name: "Audience 2", countries: "", flexibleSpecJson: "" },
+    { name: "Audience 3", countries: "", flexibleSpecJson: "" },
+    { name: "Audience 4", countries: "", flexibleSpecJson: "" },
+  ],
+  /** When splits &gt; 1, main Insert button merges picks into this slot (0-based). */
+  targetingInsertSlotIndex: 0,
 };
+
+/** Only the latest targeting-search request may update UI (tab / Search spam). */
+let targetingSearchGen = 0;
+let targetingSearchAbort = null;
 
 const TARGETING_SEARCH_TABS = [
   { type: "adinterest", label: "Interests" },
@@ -66,6 +85,54 @@ const TARGETING_FLEX_KEYS = {
   work_title: "work_positions",
   work_employer: "work_employers",
 };
+
+/** Mirrors server `TARGETING_TYPE_TO_LIMIT_TYPE` — client-side filter when API is stale. */
+const TARGETING_TAB_TO_LIMIT = {
+  adinterest: "interests",
+  adbehavior: "behaviors",
+  work_title: "work_positions",
+  work_employer: "work_employers",
+};
+
+function targetingPathHeadClient(row) {
+  return Array.isArray(row?.path) ? String(row.path[0] || "").trim().toLowerCase() : "";
+}
+
+/** Same rules as `server/meta-graph.js` `targetingRowMatchesLimitType`. */
+function targetingClientRowMatchesTab(row, limitType) {
+  const lt = String(limitType || "").trim().toLowerCase();
+  if (!lt) return true;
+  const head = targetingPathHeadClient(row);
+  if (lt === "interests" && head === "behaviors") return false;
+  if (lt === "behaviors" && head === "interests") return false;
+  if (lt === "work_positions" && (head === "interests" || head === "behaviors")) return false;
+  if (lt === "work_employers" && (head === "interests" || head === "behaviors")) return false;
+  const rt = String(row?.type ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+  if (!rt) {
+    if (lt === "interests") return head !== "behaviors";
+    if (lt === "behaviors") return head !== "interests";
+    if (lt === "work_positions" || lt === "work_employers") return true;
+    return false;
+  }
+  if (rt === lt) return true;
+  const synonyms = {
+    interests: new Set(["interests", "interest"]),
+    behaviors: new Set(["behaviors", "behavior"]),
+    work_positions: new Set(["work_positions", "work_position"]),
+    work_employers: new Set(["work_employers", "work_employer"]),
+  };
+  const syn = synonyms[lt];
+  return syn ? syn.has(rt) : rt === lt;
+}
+
+/** Kept for optional client-side filtering of stale/mock rows — live API already filters server-side. */
+function filterTargetingResultsForTab(rows, tabKey) {
+  const lim = TARGETING_TAB_TO_LIMIT[tabKey] || "interests";
+  return (Array.isArray(rows) ? rows : []).filter((r) => targetingClientRowMatchesTab(r, lim));
+}
 
 /** ISO2 list for Meta `geo_locations.countries` — grouped multi-select (reduces typos). */
 const TARGETING_COUNTRY_GROUPS = [
@@ -357,6 +424,113 @@ function buildMetaTargetingFromDraft() {
   return targeting;
 }
 
+function buildBaseTargetingWithoutFlexible() {
+  const t = buildMetaTargetingFromDraft();
+  if (t.flexible_spec) delete t.flexible_spec;
+  return t;
+}
+
+function mergeSlotTargeting(base, slot) {
+  const t = JSON.parse(JSON.stringify(base));
+  const c = String(slot.countries || "").trim();
+  if (c) {
+    const countries = c
+      .split(/[\s,]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter((code) => /^[A-Z]{2}$/.test(code));
+    if (countries.length) t.geo_locations = { countries };
+  }
+  const raw = String(slot.flexibleSpecJson || "").trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      t.flexible_spec = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      /* ignore invalid JSON */
+    }
+  }
+  return t;
+}
+
+/** Returns `adsets` array for API or null when single-ad-set (legacy targeting field). */
+function buildAdsetsPayloadForCampaign() {
+  const n = Math.min(4, Math.max(1, Number(appState.multiAdsetCount) || 1));
+  if (n <= 1) return null;
+  const base = buildBaseTargetingWithoutFlexible();
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const slot = appState.adsetSlots[i] || { name: `Audience ${i + 1}`, countries: "", flexibleSpecJson: "" };
+    out.push({
+      name: (slot.name && String(slot.name).trim()) || `Audience ${i + 1}`,
+      targeting: mergeSlotTargeting(base, slot),
+    });
+  }
+  return out;
+}
+
+function adsetSlotsPanelHtml() {
+  const n = Math.min(4, Math.max(1, Number(appState.multiAdsetCount) || 1));
+  if (n <= 1) return "";
+  let html = "";
+  for (let i = 0; i < n; i++) {
+    const s = appState.adsetSlots[i] || { name: `Audience ${i + 1}`, countries: "", flexibleSpecJson: "" };
+    html += `
+      <div class="adset-slot-card" data-adset-slot="${i}">
+        <h4 class="adset-slot-title">Ad set ${i + 1}</h4>
+        <label class="budget-field">
+          Name
+          <input type="text" class="adset-slot-name" data-adset-slot="${i}" data-field="name" value="${escapeAttr(s.name || "")}" placeholder="e.g. Broad travel" />
+        </label>
+        <label class="budget-field">
+          Countries override (optional ISO2, comma-separated)
+          <input type="text" class="adset-slot-countries" data-adset-slot="${i}" data-field="countries" value="${escapeAttr(s.countries || "")}" placeholder="LK — leave empty to use shared countries above" />
+        </label>
+        <label class="budget-field targeting-field-full">
+          Flexible spec JSON (this audience)
+          <textarea class="adset-slot-flex" data-adset-slot="${i}" data-field="flexibleSpecJson" rows="3" spellcheck="false" placeholder='[{"interests":[{"id":"6003139266461","name":"Travel"}]}]'>${escapeHtml(s.flexibleSpecJson || "")}</textarea>
+        </label>
+        <button type="button" class="btn-ghost adset-insert-picks" data-adset-slot="${i}">Insert picks into this ad set</button>
+      </div>`;
+  }
+  return html;
+}
+
+function syncAdsetSlotsFromDom() {
+  const n = Math.min(4, Math.max(1, Number(appState.multiAdsetCount) || 1));
+  for (let i = 0; i < n; i++) {
+    const nameEl = document.querySelector(`.adset-slot-name[data-adset-slot="${i}"]`);
+    const cEl = document.querySelector(`.adset-slot-countries[data-adset-slot="${i}"]`);
+    const fEl = document.querySelector(`.adset-slot-flex[data-adset-slot="${i}"]`);
+    if (!appState.adsetSlots[i]) appState.adsetSlots[i] = { name: "", countries: "", flexibleSpecJson: "" };
+    if (nameEl) appState.adsetSlots[i].name = nameEl.value;
+    if (cEl) appState.adsetSlots[i].countries = cEl.value;
+    if (fEl) appState.adsetSlots[i].flexibleSpecJson = fEl.value;
+  }
+}
+
+/** Merge audience research picks into a multi-split ad set slot (0-based). */
+function applyPicksToFlexibleSlot(slotIndex) {
+  const i = Math.max(0, Math.min(3, Number(slotIndex) || 0));
+  if (!appState.adsetSlots[i]) {
+    appState.adsetSlots[i] = { name: `Audience ${i + 1}`, countries: "", flexibleSpecJson: "" };
+  }
+  appState.adsetSlots[i].flexibleSpecJson = mergePicksIntoFlexibleSpecJson(
+    appState.targetingSearchPicks,
+    appState.adsetSlots[i].flexibleSpecJson
+  );
+}
+
+function targetingInsertSlotSelectHtml() {
+  const n = Math.min(4, Math.max(1, Number(appState.multiAdsetCount) || 1));
+  if (n <= 1) return "";
+  const cur = Math.min(n - 1, Math.max(0, Number(appState.targetingInsertSlotIndex) || 0));
+  const opts = Array.from({ length: n }, (_, i) => {
+    const sel = i === cur ? " selected" : "";
+    return `<option value="${i}"${sel}>Ad set ${i + 1}</option>`;
+  }).join("");
+  return `<label class="targeting-insert-slot-label">Insert into <select id="targetingInsertSlotSelect" aria-label="Ad set slot for Insert">${opts}</select></label>`;
+}
+
 function mergePicksIntoFlexibleSpecJson(picks, currentJson) {
   const list = Array.isArray(picks) ? picks : [];
   let base = [{}];
@@ -388,17 +562,49 @@ function targetingSearchTabsHtml() {
   ).join("");
 }
 
+/** Formats audience estimate from targeting search / reach estimate (single value or range). */
+function formatAudienceSizeCell(r) {
+  const fmt = (n) => Number(n).toLocaleString("en-US");
+  const lo = r.audience_size_lower_bound;
+  const hi = r.audience_size_upper_bound;
+  if (lo != null && hi != null && Number.isFinite(Number(lo)) && Number.isFinite(Number(hi))) {
+    const a = Number(lo);
+    const b = Number(hi);
+    if (a !== b) return `${fmt(a)}–${fmt(b)}`;
+    return fmt(a);
+  }
+  if (r.audience_size != null && Number.isFinite(Number(r.audience_size))) {
+    return fmt(r.audience_size);
+  }
+  if (lo != null && Number.isFinite(Number(lo))) return `≥${fmt(lo)}`;
+  if (hi != null && Number.isFinite(Number(hi))) return `≤${fmt(hi)}`;
+  return "—";
+}
+
+function targetingSearchEmptyMessage() {
+  const st = appState.targetingSearchStats;
+  if (st && st.graphRawCount === 0) {
+    return `Meta returned <strong>0</strong> rows for “${escapeHtml(String(st.queryNormalized || ""))}”
+      (${escapeHtml(st.limitType || "interests")}${st.countryCode ? `, ${escapeHtml(st.countryCode)}` : ""}).
+      Try a shorter keyword, another tab, or set <strong>Search scope</strong> to match your audience (e.g. LK for Sri Lanka).`;
+  }
+  if (st && st.graphRawCount > 0 && st.afterTypeFilter === 0) {
+    return `Meta returned ${st.graphRawCount} row(s) but none matched the category filter. Try another keyword or tab.`;
+  }
+  return "No results yet — pick a tab, enter a keyword, Search.";
+}
+
 function targetingSearchRowsHtml() {
   const rows = appState.targetingSearchResults || [];
   if (!rows.length) {
-    return `<tr><td colspan="4" class="targeting-search-empty">No results yet — pick a tab, enter a keyword, Search.</td></tr>`;
+    return `<tr><td colspan="4" class="targeting-search-empty">${targetingSearchEmptyMessage()}</td></tr>`;
   }
   return rows
     .map(
       (r) => `<tr>
         <td>${escapeHtml(r.name)}</td>
         <td><code>${escapeHtml(String(r.id))}</code></td>
-        <td>${r.audience_size != null ? escapeHtml(String(r.audience_size)) : "—"}</td>
+        <td>${escapeHtml(formatAudienceSizeCell(r))}</td>
         <td><button type="button" class="btn-ghost targeting-add-row" data-id="${escapeAttr(String(r.id))}" data-name="${escapeAttr(r.name || "")}">Add</button></td>
       </tr>`
     )
@@ -426,6 +632,7 @@ const endpoints = [
   "/api/policy",
   "/api/content/video-script",
   "/api/meta/health",
+  "/api/meta/token-status",
   "/api/meta/targeting-search",
   "/api/meta/track",
   "/api/meta/upload-image",
@@ -434,11 +641,19 @@ const endpoints = [
   "/api/meta/sync-audience",
   "/api/meta/create-campaign",
   "/api/meta/insights",
+  "/api/meta/adset/status",
+  "/api/meta/adset/budget",
+  "/api/meta/adset/copy",
+  "/api/meta/ad/creative",
+  "/api/meta/adset/ads?adsetId=",
   "/api/meta/optimize",
   "/api/crm/webhook",
   "/api/crm/quality",
   "/api/revenue/record",
   "/api/business/summary",
+  "/api/meta/capi/event",
+  "/api/meta/capi/log",
+  "/api/revenue/refund",
 ];
 
 const dashboard = {
@@ -454,6 +669,10 @@ const dashboard = {
   engine: null,
   policy: null,
   creativeScores: [],
+  creativeRotationHints: [],
+  winnerBoard: null,
+  splitCompare: [],
+  insightsFreshness: null,
   hooks: [],
   adPreview: null,
   business: null,
@@ -496,11 +715,64 @@ function audienceSyncEmailsFromEnv() {
     .filter(Boolean);
 }
 
+function parseAudienceEmailsFromTextarea() {
+  const el = document.querySelector("#audienceSyncEmails");
+  const raw = el ? el.value : appState.audienceSyncEmailsDraft;
+  return String(raw || "")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function buildSyncAudienceBody(segment) {
   const body = { segment };
-  const emails = audienceSyncEmailsFromEnv();
+  const fromDom = parseAudienceEmailsFromTextarea();
+  const fromEnv = audienceSyncEmailsFromEnv();
+  const emails = [...new Set([...fromDom, ...fromEnv])];
   if (emails.length) body.emails = emails;
   return body;
+}
+
+/** Payload for create-campaign creative — live Meta requires imageHash, videoId, or 2+ carousel cards. */
+function getCreativePayloadFromDashboard() {
+  const img = dashboard.assets?.images?.[0];
+  const vid = dashboard.assets?.videos?.[0];
+  const prev = dashboard.adPreview || {};
+  const carouselCards = Array.isArray(prev.carouselCards) ? prev.carouselCards.filter(Boolean) : [];
+  const imageHash = img?.imageHash && img.imageHash !== "unknown" ? img.imageHash : undefined;
+  return {
+    imageHash,
+    videoId: vid?.videoId,
+    carouselCards: carouselCards.length >= 2 ? carouselCards : undefined,
+    link: prev.linkUrl || "https://example.com/travel-offer",
+    message: prev.primaryText,
+    headline: prev.headline,
+    description: prev.description,
+  };
+}
+
+function hasCreativeAssetForLiveCampaign() {
+  const p = getCreativePayloadFromDashboard();
+  return Boolean(
+    (p.carouselCards && p.carouselCards.length >= 2) || p.imageHash || p.videoId
+  );
+}
+
+function operatorToolsLinksHtml() {
+  const base = String(API_BASE || "").replace(/\/$/, "");
+  const links = [
+    ["Health", `${base}/api/meta/health`],
+    ["Token status", `${base}/api/meta/token-status`],
+    ["CAPI log", `${base}/api/meta/capi/log?limit=40`],
+    ["Business summary", `${base}/api/business/summary`],
+    ["Policy", `${base}/api/policy`],
+  ];
+  return links
+    .map(
+      ([label, href]) =>
+        `<a class="chip" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`
+    )
+    .join(" ");
 }
 
 function escapeHtml(s) {
@@ -614,6 +886,120 @@ function tableRows(rows, keys) {
     .join("");
 }
 
+/** Campaign Health table with live Meta operator actions (pause / resume / branch copy / budget). */
+function campaignHealthRowsHtml(rows) {
+  if (!rows.length) return `<tr><td colspan="9">No data</td></tr>`;
+  return rows
+    .map((row) => {
+      const mid = row.metaAdsetId ? String(row.metaAdsetId) : "";
+      const actions = mid
+        ? `<button type="button" class="btn-ghost btn-tiny" data-adset-pause="${escapeAttr(mid)}">Pause</button>
+          <button type="button" class="btn-ghost btn-tiny" data-adset-resume="${escapeAttr(mid)}">Activate</button>
+          <button type="button" class="btn-ghost btn-tiny" data-adset-copy="${escapeAttr(mid)}">Branch copy</button>`
+        : "—";
+      const budgetCell = mid
+        ? `<span class="adset-budget-row"><input type="number" min="100" step="1" class="adset-budget-minor" data-adset-budget="${escapeAttr(mid)}" placeholder="Minor units" aria-label="Daily budget minor" />
+          <button type="button" class="btn-ghost btn-tiny" data-adset-budget-apply="${escapeAttr(mid)}">Set</button></span>`
+        : "—";
+      return `<tr>
+        <td>${escapeHtml(row.campaign)}</td>
+        <td>${escapeHtml(row.adset)}</td>
+        <td>${escapeHtml(String(row.spend))}</td>
+        <td>${escapeHtml(String(row.leads))}</td>
+        <td>${escapeHtml(String(row.cpa))}</td>
+        <td>${escapeHtml(String(row.roas))}</td>
+        <td>${escapeHtml(String(row.status))}</td>
+        <td class="campaign-actions">${actions}</td>
+        <td class="campaign-actions">${budgetCell}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function winnerBoardSectionHtml() {
+  const wb = dashboard.winnerBoard;
+  if (!wb) return "";
+  const olRoas = (rows) => {
+    const r = rows || [];
+    if (!r.length) return `<p class="meta-pill muted">No rows with spend.</p>`;
+    return `<ol class="leaderboard">${r
+      .map((x) => `<li><strong>${escapeHtml(x.adset || "")}</strong> — ROAS ${Number(x.roas || 0).toFixed(2)}</li>`)
+      .join("")}</ol>`;
+  };
+  const olQ = (rows, kind) => {
+    const r = rows || [];
+    if (!r.length) return `<p class="meta-pill muted">No rows with spend.</p>`;
+    return `<ol class="leaderboard">${r
+      .map((x) => {
+        const v =
+          kind === "q"
+            ? `${((x.qualifiedRate || 0) * 100).toFixed(1)}% qualified`
+            : `${((x.bookingRate || 0) * 100).toFixed(1)}% booking`;
+        return `<li><strong>${escapeHtml(x.adset || "")}</strong> — ${v}</li>`;
+      })
+      .join("")}</ol>`;
+  };
+  return `<div class="split three-col">
+    <article class="card">
+      <h3>Winners · ROAS</h3>
+      ${olRoas(wb.topRoas)}
+    </article>
+    <article class="card">
+      <h3>Winners · qualified rate</h3>
+      ${olQ(wb.topQualifiedRate, "q")}
+    </article>
+    <article class="card">
+      <h3>Winners · booking rate</h3>
+      ${olQ(wb.topBookingRate, "b")}
+    </article>
+  </div>`;
+}
+
+function splitCompareSectionHtml() {
+  const groups = dashboard.splitCompare || [];
+  if (!groups.length) {
+    return `<article class="card"><h3>Split comparison</h3><p class="meta-pill muted">No multi–ad-set campaigns linked by Meta campaign id yet.</p></article>`;
+  }
+  return groups
+    .map((g) => {
+      const body = (g.rows || [])
+        .map(
+          (r) =>
+            `<tr class="${r.worstInGroup ? "split-worst" : ""}">
+          <td>${escapeHtml(r.adset || "")}</td>
+          <td>${Number(r.roas || 0).toFixed(2)}</td>
+          <td>${r.rank}</td>
+          <td>${Number(r.lagVsBestRoas || 0).toFixed(2)}${r.warnGap ? ' <span class="badge-warn">gap</span>' : ""}</td>
+        </tr>`
+        )
+        .join("");
+      return `<article class="card">
+      <h3>Split compare · ${escapeHtml(g.metaCampaignId)}</h3>
+      <table class="compact-table">
+        <thead><tr><th>Ad set</th><th>ROAS</th><th>Rank</th><th>Δ ROAS vs best</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </article>`;
+    })
+    .join("");
+}
+
+function creativeRotationSectionHtml() {
+  const hints = dashboard.creativeRotationHints || [];
+  if (!hints.length) {
+    return `<article class="card"><h3>Creative rotation</h3><p class="meta-pill muted">No cut-tier or high-fatigue creatives right now.</p></article>`;
+  }
+  return `<article class="card">
+    <h3>Creative rotation (fatigue / cut tier)</h3>
+    <ul class="alerts">${hints
+      .map(
+        (h) =>
+          `<li class="warn"><strong>${escapeHtml(h.name || "")}</strong> — ${escapeHtml(h.note || "")}</li>`
+      )
+      .join("")}</ul>
+  </article>`;
+}
+
 /** Rows for Meta upload-image / upload-video results (dashboard.assets). */
 function uploadAssetsRows() {
   const a = dashboard.assets || { images: [], videos: [], adcreatives: [] };
@@ -690,6 +1076,10 @@ function render() {
               ${dashboard.meta?.metaUseMockEnv ? " · META_USE_MOCK=true" : ""}
               · token: ${dashboard.meta?.hasAccessToken ? "set" : "missing"}
               · ad account: ${dashboard.meta?.adAccountConfigured ? "set" : "missing"}
+              · Meta app ID: ${dashboard.meta?.hasAppId ? "set" : "—"}
+              · app secret: ${dashboard.meta?.hasAppSecret ? "set (proof)" : "—"}
+              · token fp: ${dashboard.meta?.tokenFingerprint ? escapeHtml(String(dashboard.meta.tokenFingerprint).slice(0, 12)) : "—"}
+              <span class="muted" title="Compare with /api/meta/token-status — same META_ACCESS_TOKEN gives same fp"> (see token-status) </span>
             </p>
             <ul class="funnel meta-mode-hints">
               ${(dashboard.meta?.modeHints || [])
@@ -701,7 +1091,11 @@ function render() {
                 ? `<p class="meta-pill warn">Demo seed rows active (non-production default). Set SEED_DEMO_DATA=false for empty dashboard.</p>`
                 : ""
             }
-            <p class="meta-pill">Tracking: POST /api/meta/track updates funnel in-app; Meta CAPI uses POST /api/meta/capi/event (separate).</p>
+            <p class="meta-pill">
+              Tracking: <code>POST /api/meta/track</code> updates funnel + (live) forwards to Meta CAPI with same
+              <code>eventId</code> when <code>META_PIXEL_ID</code> is set. Set <code>syncCapi: false</code> in the body to skip CAPI. Direct
+              <code>POST /api/meta/capi/event</code> still available for server-only events.
+            </p>
           </div>
           <div class="filters">
             <label>
@@ -754,8 +1148,12 @@ function render() {
               <h3>Business ROI (real feed)</h3>
               <ul class="funnel">
                 <li><span>Spend</span><strong>${dashboard.business?.spend || "$0.00"}</strong></li>
-                <li><span>Revenue</span><strong>${dashboard.business?.revenue || "$0.00"}</strong></li>
-                <li><span>ROAS</span><strong>${dashboard.business?.roas || "0.00x"}</strong></li>
+                <li><span>Net revenue</span><strong>${dashboard.business?.netRevenue || dashboard.business?.revenue || "$0.00"}</strong></li>
+                <li><span>Gross revenue</span><strong>${dashboard.business?.grossRevenue || dashboard.business?.revenue || "$0.00"}</strong></li>
+                <li><span>Refunds</span><strong>${dashboard.business?.refundCount ?? 0} · ${dashboard.business?.refundVolume || "$0.00"}</strong></li>
+                <li><span>ROAS (net)</span><strong>${dashboard.business?.roas || "0.00x"}</strong></li>
+                <li><span>ROAS (gross)</span><strong>${dashboard.business?.grossRoas || "0.00x"}</strong></li>
+                <li><span>Cancellation (bookings)</span><strong>${dashboard.business?.cancellationRate || "0.0%"}</strong></li>
                 <li><span>Qualified rate</span><strong>${dashboard.business?.qualifiedRate || "0.0%"}</strong></li>
                 <li><span>Booking rate</span><strong>${dashboard.business?.bookingRate || "0.0%"}</strong></li>
               </ul>
@@ -769,9 +1167,35 @@ function render() {
               </ul>
             </article>
           </div>
+          <div class="split">
+            <article class="card">
+              <h3>Insights freshness</h3>
+              <ul class="funnel">
+                <li><span>Last sync</span><strong>${dashboard.insightsFreshness?.lastSyncedAt ? escapeHtml(String(dashboard.insightsFreshness.lastSyncedAt)) : "never"}</strong></li>
+                <li><span>Age</span><strong>${
+                  dashboard.insightsFreshness?.ageMs != null
+                    ? `${Math.round(dashboard.insightsFreshness.ageMs / 60000)} min`
+                    : "—"
+                }</strong></li>
+                <li><span>Stale</span><strong>${
+                  dashboard.insightsFreshness?.stale ? "Yes — pull GET /api/meta/insights" : "OK"
+                }</strong></li>
+              </ul>
+              <p class="meta-pill muted">Scale can be blocked when <code>OPTIMIZER_BLOCK_SCALE_STALE_INSIGHTS=true</code> and data is stale.</p>
+            </article>
+            ${creativeRotationSectionHtml()}
+          </div>
+          ${winnerBoardSectionHtml()}
+          ${splitCompareSectionHtml()}
           <article class="card">
             <h3>Ready API Routes</h3>
             <div class="chips">${endpoints.map((path) => `<span class="chip">${path}</span>`).join("")}</div>
+            <p class="meta-pill muted">Also: <code>/api/meta/capi/event</code>, <code>/api/meta/capi/log</code>, <code>/api/revenue/refund</code> (POST, needs prior revenue row).</p>
+          </article>
+          <article class="card">
+            <h3>Operator tools (GET)</h3>
+            <p class="meta-pill">Opens JSON in a new tab — use for health checks, token expiry, CAPI log, business summary.</p>
+            <div class="chips">${operatorToolsLinksHtml()}</div>
           </article>
         </section>
 
@@ -780,7 +1204,8 @@ function render() {
             <h3>Audience research</h3>
             <p class="meta-pill">
               Calls <code>GET /api/meta/targeting-search</code> (Graph <code>targetingsearch</code>). Pick a category, search, then
-              <strong>Add</strong> rows and <strong>Insert into flexible spec JSON</strong> below (countries/ages stay in the next card).
+              <strong>Add</strong> rows and <strong>Insert</strong> into the global flexible JSON or a chosen ad-set slot (when splits &gt; 1).
+              Per-slot <strong>Insert picks here</strong> buttons live under each audience split. Countries/ages stay in the next card.
               <strong>Search scope:</strong> country below is sent as <code>country_code</code> for audience estimates. Live Meta required for
               real IDs; mock uses a demo row or SQLite cache from past live searches.
             </p>
@@ -814,17 +1239,19 @@ function render() {
             <p class="targeting-picks-label">Selected for flexible spec:</p>
             <div class="targeting-picks-chips">${targetingPicksHtml()}</div>
             <div class="targeting-search-actions">
+              ${targetingInsertSlotSelectHtml()}
               <button type="button" id="targetingApplyFlexible">Insert selected into flexible spec JSON</button>
               <button type="button" class="btn-ghost" id="targetingPicksClear">Clear selection</button>
             </div>
           </article>
           <article class="card">
             <h3>Campaign Health</h3>
-            <table>
+            <p class="meta-pill muted">Live Meta: Pause / Activate / branch copy (duplicate ad set) and set daily budget (minor units, e.g. 500 = $5.00 when exponent 2).</p>
+            <table class="campaign-health-table">
               <thead>
-                <tr><th>Campaign</th><th>Adset</th><th>Spend</th><th>Leads</th><th>CPA</th><th>ROAS</th><th>Status</th></tr>
+                <tr><th>Campaign</th><th>Ad set</th><th>Spend</th><th>Leads</th><th>CPA</th><th>ROAS</th><th>Status</th><th>Actions</th><th>Budget</th></tr>
               </thead>
-              <tbody>${tableRows(dashboard.campaigns, ["campaign", "adset", "spend", "leads", "cpa", "roas", "status"])}</tbody>
+              <tbody>${campaignHealthRowsHtml(dashboard.campaigns)}</tbody>
             </table>
           </article>
           <article class="card targeting-card">
@@ -895,7 +1322,30 @@ function render() {
                   spellcheck="false"
                   placeholder='[{"interests":[{"id":"6003139266461","name":"Travel"}],"behaviors":[]}]'
                 >${escapeHtml(appState.targetingDraft.flexibleSpecJson)}</textarea>
+                <span class="targeting-countries-hint" id="flexibleGlobalHint"
+                  >${
+                    Number(appState.multiAdsetCount) > 1
+                      ? "<strong>Splits &gt; 1:</strong> per-audience flexible JSON is in each row below — this box is ignored."
+                      : "Interests/behaviors; use Audience research → Insert, or paste JSON here."
+                  }</span
+                >
               </label>
+              <div class="multi-adset-panel">
+                <label class="budget-field">
+                  Audience splits (same campaign + creative)
+                  <select id="multiAdsetCount">
+                    <option value="1" ${Number(appState.multiAdsetCount) === 1 ? "selected" : ""}>1 ad set</option>
+                    <option value="2" ${Number(appState.multiAdsetCount) === 2 ? "selected" : ""}>2 ad sets</option>
+                    <option value="3" ${Number(appState.multiAdsetCount) === 3 ? "selected" : ""}>3 ad sets</option>
+                    <option value="4" ${Number(appState.multiAdsetCount) === 4 ? "selected" : ""}>4 ad sets</option>
+                  </select>
+                </label>
+                <p class="meta-pill multi-adset-explainer">
+                  Shared: countries, ages, locales above. Each split adds its own <code>flexible_spec</code> (and optional country override).
+                  <strong>Daily budget</strong> applies per ad set.
+                </p>
+                <div id="adsetSlotsPanel" class="adset-slots-panel">${adsetSlotsPanelHtml()}</div>
+              </div>
             </div>
           </article>
           <article class="card">
@@ -981,7 +1431,10 @@ function render() {
           <article class="card ad-build-card">
             <h3>Upload &amp; build</h3>
             <p class="ad-build-lead">Hook + Problem + Offer + Proof + CTA — uploads here sync the <strong>preview above</strong> and Meta asset list.</p>
-            <p class="meta-pill">Mock: choose a file or sample URL. Live: public https image URL for Graph <code>adimages</code>.</p>
+            <p class="meta-pill">
+              Mock: choose a file or sample URL. Live: file picker sends <code>data:image/…;base64,…</code> (server uploads via Graph
+              <code>bytes</code>) or use a public <code>https://</code> URL.
+            </p>
             <input type="file" id="imageFileInput" accept="image/*" hidden aria-hidden="true" />
             <div class="ad-build-row">
               <button type="button" id="imageButton">Choose image file…</button>
@@ -1017,7 +1470,19 @@ function render() {
           </article>
           <article class="card">
             <h3>Audience Jobs</h3>
-            <p class="meta-pill">Live mode: real Custom Audience upload needs <code>emails[]</code>. Set <code>VITE_AUDIENCE_SYNC_EMAILS</code> (comma-separated) in env for these buttons, or POST emails from your CRM.</p>
+            <p class="meta-pill">
+              Live mode: <strong>emails required</strong> — paste below and/or set <code>VITE_AUDIENCE_SYNC_EMAILS</code> in the UI env.
+              Values are merged (deduped).
+            </p>
+            <label class="budget-field">
+              Emails for Custom Audience (comma or newline)
+              <textarea
+                id="audienceSyncEmails"
+                rows="4"
+                placeholder="lead1@example.com, lead2@example.com"
+                spellcheck="false"
+              >${escapeHtml(appState.audienceSyncEmailsDraft)}</textarea>
+            </label>
             <button type="button" id="syncHotButton">Sync Hot Audience</button>
             <button type="button" id="syncWarmButton">Sync Warm Audience</button>
           </article>
@@ -1166,6 +1631,11 @@ function render() {
         <section class="view ${appState.activeView === "optimizer" ? "show" : ""}" id="optimizer">
           <article class="card">
             <h3>Optimizer Actions</h3>
+            <p class="meta-pill">
+              Uses <strong>engine DB</strong> + in-app state. Real spend/leads need live Meta
+              <code>GET /api/meta/insights</code> reconciliation (cron) and CRM/revenue feeds — empty demo rows
+              <strong>SEED_DEMO_DATA=false</strong> help avoid false confidence.
+            </p>
             <table>
               <thead>
                 <tr><th>Adset</th><th>Action</th><th>Reason</th><th>Confidence</th></tr>
@@ -1187,6 +1657,53 @@ function render() {
   `;
 
   bindEvents();
+}
+
+/** Uses active tab + query; syncs `targetingSearchTab` from the selected `.targeting-tab.active` button. */
+async function runTargetingSearch() {
+  const q = (document.querySelector("#targetingSearchQuery")?.value || "").trim();
+  appState.targetingSearchQuery = q;
+  const activeBtn = document.querySelector(".targeting-tab.active");
+  const fromDom = activeBtn?.dataset?.targetingTab;
+  if (fromDom) appState.targetingSearchTab = fromDom;
+  const type = appState.targetingSearchTab;
+  if (!q) {
+    appState.error = "Enter a search keyword.";
+    render();
+    return;
+  }
+
+  const gen = ++targetingSearchGen;
+  targetingSearchAbort?.abort();
+  const ac = new AbortController();
+  targetingSearchAbort = ac;
+
+  try {
+    const params = new URLSearchParams({ q, type, limit: "25" });
+    const cc = String(appState.targetingSearchCountry || "LK")
+      .trim()
+      .toUpperCase();
+    if (/^[A-Z]{2}$/.test(cc)) {
+      params.set("country_code", cc);
+    }
+    const data = await apiFetch(`/api/meta/targeting-search?${params.toString()}`, {
+      method: "GET",
+      signal: ac.signal,
+    });
+    if (gen !== targetingSearchGen) return;
+    const raw = Array.isArray(data.results) ? data.results : [];
+    appState.targetingSearchStats = data.searchStats || null;
+    /** Live responses are already filtered by the API; only re-filter mock/cache if needed. */
+    const useClientFilter = data.metaMode === "mock" && data.source === "sqlite_cache";
+    appState.targetingSearchResults = useClientFilter ? filterTargetingResultsForTab(raw, type) : raw;
+    appState.error = "";
+    render();
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (gen !== targetingSearchGen) return;
+    appState.error = error.message || String(error);
+    render();
+  }
 }
 
 function bindEvents() {
@@ -1217,7 +1734,10 @@ function bindEvents() {
       const t = btn.dataset.targetingTab;
       if (t) {
         appState.targetingSearchTab = t;
+        appState.targetingSearchResults = [];
         render();
+        const q = (document.querySelector("#targetingSearchQuery")?.value || "").trim();
+        if (q) void runTargetingSearch();
       }
     });
   });
@@ -1226,40 +1746,75 @@ function bindEvents() {
     appState.targetingSearchQuery = e.target.value;
   });
 
-  document.querySelector("#targetingSearchRun")?.addEventListener("click", async () => {
-    const q = (document.querySelector("#targetingSearchQuery")?.value || "").trim();
-    appState.targetingSearchQuery = q;
-    if (!q) {
-      appState.error = "Enter a search keyword.";
-      render();
-      return;
-    }
-    try {
-      const type = appState.targetingSearchTab;
-      const params = new URLSearchParams({ q, type, limit: "25" });
-      const cc = String(appState.targetingSearchCountry || "LK")
-        .trim()
-        .toUpperCase();
-      if (/^[A-Z]{2}$/.test(cc)) {
-        params.set("country_code", cc);
-      }
-      const data = await apiFetch(`/api/meta/targeting-search?${params.toString()}`, { method: "GET" });
-      appState.targetingSearchResults = Array.isArray(data.results) ? data.results : [];
-      appState.error = "";
-      render();
-    } catch (error) {
-      appState.error = error.message || String(error);
-      render();
-    }
+  document.querySelector("#targetingSearchRun")?.addEventListener("click", () => {
+    void runTargetingSearch();
   });
 
   document.querySelector("#targetingApplyFlexible")?.addEventListener("click", () => {
     syncTargetingDraftFromDom();
-    appState.targetingDraft.flexibleSpecJson = mergePicksIntoFlexibleSpecJson(
-      appState.targetingSearchPicks,
-      appState.targetingDraft.flexibleSpecJson
-    );
+    syncAdsetSlotsFromDom();
+    const n = Number(appState.multiAdsetCount) || 1;
+    if (n > 1) {
+      const sel = document.querySelector("#targetingInsertSlotSelect");
+      const slot = Math.min(n - 1, Math.max(0, Number(sel?.value ?? appState.targetingInsertSlotIndex) || 0));
+      appState.targetingInsertSlotIndex = slot;
+      applyPicksToFlexibleSlot(slot);
+    } else {
+      appState.targetingDraft.flexibleSpecJson = mergePicksIntoFlexibleSpecJson(
+        appState.targetingSearchPicks,
+        appState.targetingDraft.flexibleSpecJson
+      );
+    }
     render();
+  });
+
+  document.querySelector("#targetingInsertSlotSelect")?.addEventListener("change", (e) => {
+    appState.targetingInsertSlotIndex = Math.max(0, Math.min(3, Number(e.target.value) || 0));
+  });
+
+  document.querySelector("#campaigns")?.addEventListener("click", (e) => {
+    const insertHere = e.target.closest(".adset-insert-picks");
+    if (insertHere) {
+      const idx = Number(insertHere.dataset.adsetSlot);
+      if (Number.isNaN(idx)) return;
+      syncTargetingDraftFromDom();
+      syncAdsetSlotsFromDom();
+      applyPicksToFlexibleSlot(idx);
+      appState.targetingInsertSlotIndex = idx;
+      render();
+      return;
+    }
+    const pauseEl = e.target.closest("[data-adset-pause]");
+    if (pauseEl) {
+      const id = pauseEl.getAttribute("data-adset-pause");
+      if (id) void runAction("/api/meta/adset/status", { metaAdsetId: id, status: "PAUSED" });
+      return;
+    }
+    const resumeEl = e.target.closest("[data-adset-resume]");
+    if (resumeEl) {
+      const id = resumeEl.getAttribute("data-adset-resume");
+      if (id) void runAction("/api/meta/adset/status", { metaAdsetId: id, status: "ACTIVE" });
+      return;
+    }
+    const copyEl = e.target.closest("[data-adset-copy]");
+    if (copyEl) {
+      const id = copyEl.getAttribute("data-adset-copy");
+      if (id) void runAction("/api/meta/adset/copy", { sourceAdsetId: id });
+      return;
+    }
+    const budgetBtn = e.target.closest("[data-adset-budget-apply]");
+    if (budgetBtn) {
+      const id = budgetBtn.getAttribute("data-adset-budget-apply");
+      const tr = budgetBtn.closest("tr");
+      const inp = tr?.querySelector(".adset-budget-minor");
+      const minor = Number(inp?.value);
+      if (!id || !(minor > 0)) {
+        appState.error = "Enter daily budget in minor units (e.g. 2500 for $25.00).";
+        render();
+        return;
+      }
+      void runAction("/api/meta/adset/budget", { metaAdsetId: id, dailyBudgetMinor: minor });
+    }
   });
 
   document.querySelector("#targetingPicksClear")?.addEventListener("click", () => {
@@ -1304,17 +1859,33 @@ function bindEvents() {
   if (campaignButton) {
     campaignButton.addEventListener("click", () => {
       syncTargetingDraftFromDom();
+      syncAdsetSlotsFromDom();
       const raw = document.querySelector("#campaignDailyBudget")?.value;
       const dailyBudget = parsePositiveBudget(raw, appState.budgets.campaign);
       appState.budgets.campaign = dailyBudget;
-      runAction("/api/meta/create-campaign", {
+      const isLive = dashboard.meta?.mode === "live";
+      if (isLive && !hasCreativeAssetForLiveCampaign()) {
+        appState.error =
+          "Live mode: upload an image or video on Creatives (or use a carousel with 2+ cards in preview), then create the campaign. Meta needs imageHash / videoId / carousel for the ad creative.";
+        render();
+        return;
+      }
+      const creative = getCreativePayloadFromDashboard();
+      const adsets = buildAdsetsPayloadForCampaign();
+      const payload = {
         campaignName: "Travel Sales - Auto",
-        adsetName: "Auto Generated",
         dailyBudget,
-        targeting: buildMetaTargetingFromDraft(),
         expectedLeads: 40,
         expectedRoas: 3.1,
-      });
+        ...creative,
+      };
+      if (adsets && adsets.length > 1) {
+        payload.adsets = adsets;
+      } else {
+        payload.adsetName = "Auto Generated";
+        payload.targeting = buildMetaTargetingFromDraft();
+      }
+      runAction("/api/meta/create-campaign", payload);
     });
   }
   const campaignDailyBudgetEl = document.querySelector("#campaignDailyBudget");
@@ -1375,6 +1946,20 @@ function bindEvents() {
   });
   document.querySelector("#targetingFlexibleJson")?.addEventListener("input", (e) => {
     appState.targetingDraft.flexibleSpecJson = e.target.value;
+  });
+
+  document.querySelector("#multiAdsetCount")?.addEventListener("change", (e) => {
+    syncAdsetSlotsFromDom();
+    appState.multiAdsetCount = Math.min(4, Math.max(1, Number(e.target.value) || 1));
+    appState.targetingInsertSlotIndex = Math.min(
+      appState.multiAdsetCount - 1,
+      Math.max(0, appState.targetingInsertSlotIndex)
+    );
+    render();
+  });
+
+  document.querySelector("#audienceSyncEmails")?.addEventListener("input", (e) => {
+    appState.audienceSyncEmailsDraft = e.target.value;
   });
 
   const imageFileInput = document.querySelector("#imageFileInput");
@@ -1669,13 +2254,25 @@ function bindEvents() {
   }
 }
 
+function formatMetaExpiredTokenHint(message) {
+  const s = String(message || "");
+  if (!/session has expired|error validating access token/i.test(s)) return s;
+  return `${s}
+
+Which API? You are calling: ${API_BASE}
+• Local: save META_ACCESS_TOKEN in .env, then restart the API (stop dev:all and run again). Kill old process on port 3001 if needed.
+• Vercel/production: set META_ACCESS_TOKEN in the host’s Environment Variables and redeploy — .env on your laptop does not apply there.
+• Verify this server’s token: open GET ${API_BASE}/api/meta/token-status in the browser (valid + expiry).`;
+}
+
 async function apiFetch(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (CLIENT_API_KEY) headers["X-API-Key"] = CLIENT_API_KEY;
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${path}`);
+    const raw = data.error != null ? (typeof data.error === "string" ? data.error : JSON.stringify(data.error)) : "";
+    throw new Error(formatMetaExpiredTokenHint(raw || `Request failed: ${path}`));
   }
   return data;
 }
@@ -1743,6 +2340,10 @@ async function loadDashboard(opts = {}) {
     dashboard.engine = data.engine || null;
     dashboard.policy = data.policy || null;
     dashboard.creativeScores = data.creativeScores || [];
+    dashboard.creativeRotationHints = data.creativeRotationHints || [];
+    dashboard.winnerBoard = data.winnerBoard ?? null;
+    dashboard.splitCompare = data.splitCompare || [];
+    dashboard.insightsFreshness = data.insightsFreshness ?? null;
     dashboard.hooks = data.hooks || [];
     dashboard.adPreview = data.adPreview || dashboard.adPreview;
     applyLocalPreviewImageBlob();

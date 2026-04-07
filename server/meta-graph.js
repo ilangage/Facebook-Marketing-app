@@ -2,9 +2,18 @@
  * Meta Marketing API helpers (Graph).
  * Requires: META_ACCESS_TOKEN, META_AD_ACCOUNT_ID (act_...)
  * For creatives/ads: META_PAGE_ID, optional META_PIXEL_ID, optional META_INSTAGRAM_ACTOR_ID (IG professional account for IG placements)
+ * Optional: META_APP_ID, META_APP_SECRET — appsecret_proof on Graph calls (recommended if your app requires it).
  */
 
+import crypto from "node:crypto";
 import { validateAdCopyForLinkCreative } from "./meta-creative-validate.js";
+
+/** Meta: appsecret_proof = HMAC-SHA256(app_secret, access_token) as hex. */
+export function buildAppSecretProof(accessToken) {
+  const appSecret = (process.env.META_APP_SECRET || process.env.App_secret || "").trim();
+  if (!appSecret || !accessToken) return "";
+  return crypto.createHmac("sha256", appSecret).update(accessToken).digest("hex");
+}
 
 /** Preset keys merged into ad set `targeting` (unless user already set those keys). */
 const PLACEMENT_PRESETS = {
@@ -66,6 +75,8 @@ export function getMetaConfig() {
   if (adAccountId && !adAccountId.startsWith("act_")) {
     adAccountId = `act_${adAccountId}`;
   }
+  const appId = (process.env.META_APP_ID || process.env.App_ID || "").trim();
+  const appSecret = (process.env.META_APP_SECRET || process.env.App_secret || "").trim();
   return {
     token,
     adAccountId,
@@ -75,12 +86,73 @@ export function getMetaConfig() {
     instagramActorId: (process.env.META_INSTAGRAM_ACTOR_ID || "").trim(),
     apiVersion: process.env.META_API_VERSION || "v23.0",
     appBaseUrl: process.env.APP_BASE_URL || "http://localhost:5173",
+    /** Meta App Dashboard → App ID (for OAuth/debug; not sent as Graph token). */
+    appId,
+    /** App Secret — never log; used only for appsecret_proof when set. */
+    appSecret,
   };
 }
 
 export function isMetaConfigured() {
   const c = getMetaConfig();
   return Boolean(c.token && c.adAccountId);
+}
+
+/**
+ * Short SHA256 prefix of the current access token (for comparing local vs deployed env without exposing the token).
+ */
+export function getAccessTokenFingerprint() {
+  const t = (process.env.META_ACCESS_TOKEN || "").trim();
+  if (!t) return "";
+  return crypto.createHash("sha256").update(t).digest("hex").slice(0, 12);
+}
+
+/**
+ * Meta Graph `debug_token` — requires app id + app secret. Returns validity and expiry (no secrets).
+ */
+export async function fetchAccessTokenDebugInfo() {
+  const c = getMetaConfig();
+  const tokenFingerprint = getAccessTokenFingerprint();
+  if (!c.token) {
+    return { ok: false, tokenFingerprint: "", error: "META_ACCESS_TOKEN missing" };
+  }
+  if (!c.appId || !c.appSecret) {
+    return {
+      ok: false,
+      tokenFingerprint,
+      error: "Set META_APP_ID and META_APP_SECRET to check token expiry (Graph debug_token).",
+    };
+  }
+  const url = new URL(`https://graph.facebook.com/${c.apiVersion}/debug_token`);
+  url.searchParams.set("input_token", c.token);
+  url.searchParams.set("access_token", `${c.appId}|${c.appSecret}`);
+  const res = await fetch(url.href);
+  const raw = await res.json();
+  if (raw.error) {
+    return {
+      ok: false,
+      tokenFingerprint,
+      error: raw.error.message || JSON.stringify(raw.error),
+      code: raw.error.code,
+    };
+  }
+  const d = raw.data;
+  if (!d || typeof d !== "object") {
+    return { ok: false, tokenFingerprint, error: "Empty debug_token response" };
+  }
+  return {
+    ok: true,
+    valid: d.is_valid === true,
+    expiresAt: d.expires_at ? new Date(d.expires_at * 1000).toISOString() : null,
+    dataAccessExpiresAt: d.data_access_expires_at
+      ? new Date(d.data_access_expires_at * 1000).toISOString()
+      : null,
+    userId: d.user_id != null ? String(d.user_id) : null,
+    appId: d.app_id != null ? String(d.app_id) : null,
+    scopes: Array.isArray(d.scopes) ? d.scopes : [],
+    applicationName: typeof d.application === "string" ? d.application : "",
+    tokenFingerprint,
+  };
 }
 
 /** Defaults aligned with goal qualified_booking_roas (conversions + revenue), not traffic clicks. */
@@ -108,6 +180,8 @@ export function majorCurrencyToMinorUnits(majorAmount) {
 function toFormBody(token, params) {
   const body = new URLSearchParams();
   body.set("access_token", token);
+  const proof = buildAppSecretProof(token);
+  if (proof) body.set("appsecret_proof", proof);
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
     if (typeof value === "object") {
@@ -152,17 +226,208 @@ export async function graphPostForm(path, params) {
   return data;
 }
 
+/** Maps targetingsearch `type` → flexible_spec key (same as client `TARGETING_FLEX_KEYS`). */
+const TARGETING_TYPE_TO_FLEX_KEY = {
+  adinterest: "interests",
+  adbehavior: "behaviors",
+  work_title: "work_positions",
+  work_employer: "work_employers",
+};
+
+/**
+ * Ad account `GET /{ad-account-id}/targetingsearch` expects `limit_type` (interests, behaviors, work_positions, …).
+ * Legacy `type=adinterest` / `type=work_title` is not applied → mixed results.
+ */
+const TARGETING_TYPE_TO_LIMIT_TYPE = {
+  adinterest: "interests",
+  adbehavior: "behaviors",
+  work_title: "work_positions",
+  work_employer: "work_employers",
+};
+
+/** First path segment is often the category label ("Interests", "Behaviors", …). */
+function targetingPathHead(row) {
+  return Array.isArray(row?.path) ? String(row.path[0] || "").trim().toLowerCase() : "";
+}
+
+/**
+ * Graph `row.type` must align with `limit_type`. Meta sometimes returns mixed rows or omits `type`;
+ * use `path[0]` to reject obvious cross-category rows (e.g. Interests under Behaviors tab).
+ * When `type` is omitted, `limit_type` on the request already scopes results — do not drop rows
+ * just because path[0] lacks the substring "interest" (Graph uses varied path labels).
+ */
+function targetingRowMatchesLimitType(row, limitType) {
+  const lt = String(limitType || "").trim().toLowerCase();
+  if (!lt) return true;
+
+  const head = targetingPathHead(row);
+  if (lt === "interests" && head === "behaviors") return false;
+  if (lt === "behaviors" && head === "interests") return false;
+  if (lt === "work_positions" && (head === "interests" || head === "behaviors")) return false;
+  if (lt === "work_employers" && (head === "interests" || head === "behaviors")) return false;
+
+  const rt = String(row?.type ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+  if (!rt) {
+    if (lt === "interests") return head !== "behaviors";
+    if (lt === "behaviors") return head !== "interests";
+    if (lt === "work_positions" || lt === "work_employers") return true;
+    return false;
+  }
+  if (rt === lt) return true;
+  const synonyms = {
+    interests: new Set(["interests", "interest"]),
+    behaviors: new Set(["behaviors", "behavior"]),
+    work_positions: new Set(["work_positions", "work_position"]),
+    work_employers: new Set(["work_employers", "work_employer"]),
+  };
+  const syn = synonyms[lt];
+  return syn ? syn.has(rt) : rt === lt;
+}
+
+function mapTargetingSearchRow(row, type) {
+  const t = String(type || "adinterest").trim();
+  const lo = row.audience_size_lower_bound != null ? Number(row.audience_size_lower_bound) : null;
+  const hi = row.audience_size_upper_bound != null ? Number(row.audience_size_upper_bound) : null;
+  let audience_size = row.audience_size != null ? Number(row.audience_size) : null;
+  if (audience_size == null && lo != null && hi != null) {
+    audience_size = Math.round((lo + hi) / 2);
+  } else if (audience_size == null && lo != null) {
+    audience_size = lo;
+  } else if (audience_size == null && hi != null) {
+    audience_size = hi;
+  }
+  return {
+    id: row.id != null ? String(row.id) : "",
+    name: row.name || "",
+    /** Graph taxonomy only — do not fall back to request tab `t` (that masks mixed rows). */
+    type:
+      row.type != null && String(row.type).trim() !== ""
+        ? String(row.type)
+        : null,
+    audience_size,
+    audience_size_lower_bound: Number.isFinite(lo) ? lo : null,
+    audience_size_upper_bound: Number.isFinite(hi) ? hi : null,
+    path: Array.isArray(row.path) ? row.path : [],
+  };
+}
+
+function hasAudienceSignal(row) {
+  return (
+    row.audience_size != null ||
+    row.audience_size_lower_bound != null ||
+    row.audience_size_upper_bound != null
+  );
+}
+
+/** Parses GET /reachestimate response (shape varies slightly by API version). */
+export function parseReachEstimatePayload(raw) {
+  const first = Array.isArray(raw?.data) ? raw.data[0] : raw?.data ?? raw;
+  if (!first || typeof first !== "object") return null;
+  if (first.unsupported === true) return null;
+  const lo = first.users_lower_bound;
+  const hi = first.users_upper_bound;
+  const single = first.users;
+  if (lo != null && hi != null) {
+    const l = Number(lo);
+    const h = Number(hi);
+    if (!Number.isFinite(l) || !Number.isFinite(h)) return null;
+    return { lower: l, upper: h, midpoint: Math.round((l + h) / 2) };
+  }
+  if (single != null) {
+    const n = Number(single);
+    if (!Number.isFinite(n)) return null;
+    return { lower: n, upper: n, midpoint: n };
+  }
+  return null;
+}
+
+async function reachEstimateForInterest({ flexKey, interestId, countryCode }) {
+  const c = getMetaConfig();
+  const countries =
+    countryCode && /^[A-Z]{2}$/.test(String(countryCode).trim().toUpperCase())
+      ? [String(countryCode).trim().toUpperCase()]
+      : ["US"];
+  const flexObj = { [flexKey]: [{ id: String(interestId) }] };
+  const targeting_spec = {
+    geo_locations: { countries },
+    age_min: 18,
+    age_max: 65,
+    flexible_spec: [flexObj],
+  };
+  const raw = await graphGet(`/${c.adAccountId}/reachestimate`, {
+    targeting_spec: JSON.stringify(targeting_spec),
+  });
+  return parseReachEstimatePayload(raw);
+}
+
+async function enrichTargetingRowsWithReachEstimates(rows, type, countryCode) {
+  if (process.env.TARGETING_REACH_ESTIMATE === "false") return rows;
+  const maxCalls = Math.min(50, Math.max(1, Number(process.env.TARGETING_REACH_ESTIMATE_MAX) || 18));
+  const flexKey = TARGETING_TYPE_TO_FLEX_KEY[String(type).trim()] || "interests";
+  const cc = String(countryCode || "")
+    .trim()
+    .toUpperCase();
+  const validCc = /^[A-Z]{2}$/.test(cc) ? cc : null;
+  const out = [];
+  let calls = 0;
+  for (const row of rows) {
+    if (hasAudienceSignal(row)) {
+      out.push(row);
+      continue;
+    }
+    if (!row.id || calls >= maxCalls) {
+      out.push(row);
+      continue;
+    }
+    calls += 1;
+    try {
+      const est = await reachEstimateForInterest({
+        flexKey,
+        interestId: row.id,
+        countryCode: validCc,
+      });
+      if (est) {
+        out.push({
+          ...row,
+          audience_size: est.midpoint,
+          audience_size_lower_bound: est.lower,
+          audience_size_upper_bound: est.upper,
+        });
+      } else {
+        out.push(row);
+      }
+    } catch {
+      out.push(row);
+    }
+  }
+  return out;
+}
+
 /**
  * Meta targeting search (interests, behaviors, work titles, employers, …).
+ * When Graph omits `audience_size`, optionally calls `/reachestimate` per row (capped) to fill estimates.
  * @see https://developers.facebook.com/docs/marketing-api/audiences/reference/targeting-search
+ * @see https://developers.facebook.com/docs/marketing-api/reference/ad-account/reachestimate/
  */
+/** Trim + strip wrapping quotes so pasted `"travel"` searches as travel. */
+export function normalizeTargetingSearchQuery(q) {
+  let s = String(q ?? "").trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
 export async function searchTargetingCatalog({ q, type, limit = 25, countryCode }) {
   const c = getMetaConfig();
   if (!c.token || !c.adAccountId) {
     throw new Error("META_ACCESS_TOKEN and META_AD_ACCOUNT_ID are required for targeting search");
   }
   const lim = Math.min(Math.max(Number(limit) || 25, 1), 50);
-  const query = String(q || "").trim();
+  const query = normalizeTargetingSearchQuery(q);
   if (!query) {
     throw new Error("Query q is required");
   }
@@ -170,24 +435,35 @@ export async function searchTargetingCatalog({ q, type, limit = 25, countryCode 
   const cc = String(countryCode || "")
     .trim()
     .toUpperCase();
+  const limitType = TARGETING_TYPE_TO_LIMIT_TYPE[t] || "interests";
+  /** Ask for more rows than needed, then filter by category — Graph can return mixed `type` values. */
+  const fetchCap = Math.min(50, Math.max(lim, Math.ceil(lim * 2.5)));
   const params = {
     q: query,
-    type: t,
-    limit: lim,
+    limit_type: limitType,
+    limit: fetchCap,
   };
   /** Scopes audience estimates to this country (Meta `country_code` on ad account targetingsearch). */
   if (cc && /^[A-Z]{2}$/.test(cc)) {
     params.country_code = cc;
   }
   const raw = await graphGet(`/${c.adAccountId}/targetingsearch`, params);
-  const data = Array.isArray(raw.data) ? raw.data : [];
-  return data.map((row) => ({
-    id: row.id != null ? String(row.id) : "",
-    name: row.name || "",
-    type: row.type || t,
-    audience_size: row.audience_size != null ? Number(row.audience_size) : null,
-    path: Array.isArray(row.path) ? row.path : [],
-  }));
+  const rawRows = Array.isArray(raw.data) ? raw.data : [];
+  const graphRawCount = rawRows.length;
+  let data = rawRows.filter((row) => targetingRowMatchesLimitType(row, limitType)).slice(0, lim);
+  const afterTypeFilter = data.length;
+  const mapped = data.map((row) => mapTargetingSearchRow(row, t));
+  const results = await enrichTargetingRowsWithReachEstimates(mapped, t, cc || undefined);
+  return {
+    results,
+    searchStats: {
+      queryNormalized: query,
+      graphRawCount,
+      afterTypeFilter,
+      limitType,
+      countryCode: cc && /^[A-Z]{2}$/.test(cc) ? cc : undefined,
+    },
+  };
 }
 
 export async function graphGet(path, query = {}) {
@@ -200,6 +476,8 @@ export async function graphGet(path, query = {}) {
     if (v === undefined || v === null) continue;
     url.searchParams.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
   }
+  const proof = buildAppSecretProof(c.token);
+  if (proof) url.searchParams.set("appsecret_proof", proof);
   const data = await fetchJsonWithTimeout(url.href, {
     headers: {
       Authorization: `Bearer ${c.token}`,
@@ -220,11 +498,13 @@ export async function deleteGraphObject(objectId) {
   if (!c.token) {
     throw new Error("META_ACCESS_TOKEN is missing");
   }
-  const url = `https://graph.facebook.com/${c.apiVersion}/${objectId}`;
+  const u = new URL(`https://graph.facebook.com/${c.apiVersion}/${objectId}`);
+  const proof = buildAppSecretProof(c.token);
+  if (proof) u.searchParams.set("appsecret_proof", proof);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(u.href, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${c.token}` },
       signal: controller.signal,
@@ -268,11 +548,94 @@ async function rollbackPartialCampaignChain(partial) {
   }
 }
 
+async function rollbackPartialMultiChain(partial) {
+  if (!partial) return;
+  for (const p of partial.pairs || []) {
+    try {
+      if (p.ad?.id) await deleteGraphObject(p.ad.id);
+    } catch {
+      /* best-effort */
+    }
+    try {
+      if (p.adset?.id) await deleteGraphObject(p.adset.id);
+    } catch {
+      /* best-effort */
+    }
+  }
+  try {
+    if (partial.creative?.id) await deleteGraphObject(partial.creative.id);
+  } catch {
+    /* best-effort */
+  }
+  try {
+    if (partial.campaign?.id) await deleteGraphObject(partial.campaign.id);
+  } catch {
+    /* best-effort */
+  }
+}
+
+function defaultTargetingFallback() {
+  return {
+    geo_locations: { countries: ["LK"] },
+    age_min: 21,
+    age_max: 55,
+    locales: [1000],
+  };
+}
+
+/**
+ * Resolves 1–4 ad set specs from `body.adsets` or legacy `adsetName` + `targeting`.
+ * @throws {Error} if more than 4 ad sets
+ */
+export function normalizeAdsetSpecs(body) {
+  const shared =
+    body.targeting && typeof body.targeting === "object" && Object.keys(body.targeting).length > 0
+      ? body.targeting
+      : null;
+
+  if (Array.isArray(body.adsets) && body.adsets.length > 0) {
+    if (body.adsets.length > 4) {
+      throw new Error("Maximum 4 ad sets per campaign");
+    }
+    return body.adsets.map((a, i) => {
+      const name = (a.name && String(a.name).trim()) || `Ad Set ${i + 1}`;
+      const t =
+        a.targeting && typeof a.targeting === "object" && Object.keys(a.targeting).length > 0
+          ? a.targeting
+          : shared || defaultTargetingFallback();
+      return { name, targeting: t };
+    });
+  }
+
+  return [
+    {
+      name: (body.adsetName && String(body.adsetName).trim()) || "Travel Ad Set",
+      targeting: shared || defaultTargetingFallback(),
+    },
+  ];
+}
+
 /** Upload image by public HTTPS URL → returns Graph response (images.{hash}) */
 export async function uploadAdImageFromUrl(imageUrl, name) {
   const c = getMetaConfig();
   return graphPostForm(`/${c.adAccountId}/adimages`, {
     url: imageUrl,
+    name: name || "image",
+  });
+}
+
+/**
+ * Upload image from raw base64 (no data: URL prefix) — Graph `bytes` param.
+ * @see https://developers.facebook.com/docs/marketing-api/reference/ad-account/adimages/
+ */
+export async function uploadAdImageFromBase64(base64Payload, name) {
+  const c = getMetaConfig();
+  const bytes = String(base64Payload || "").replace(/\s/g, "");
+  if (!bytes.length) {
+    throw new Error("bytes payload is empty");
+  }
+  return graphPostForm(`/${c.adAccountId}/adimages`, {
+    bytes,
     name: name || "image",
   });
 }
@@ -365,40 +728,44 @@ export async function createLinkAdCreative(payload) {
 /**
  * Create campaign → ad set → creative → ad (all PAUSED by default).
  * dailyBudget: dollars in request; sent to Meta as minor units (×100 for USD-style accounts).
+ * When `body.adsets` has 2–4 items, creates one campaign + one shared creative + one ad set + ad per spec (audience testing).
  */
 export async function createCampaignChain(body) {
+  const specs = normalizeAdsetSpecs(body);
+  if (specs.length === 1) {
+    return createCampaignChainSingle(body, specs[0]);
+  }
+  return createCampaignChainMulti(body, specs);
+}
+
+async function createCampaignChainSingle(body, spec) {
+  const merged = { ...body, adsetName: spec.name, targeting: spec.targeting };
   const c = getMetaConfig();
   const defs = getDefaultCampaignDefaults();
-  const objective = body.objective || defs.objective;
-  const optimizationGoal = body.optimizationGoal || defs.optimizationGoal;
-  const customEventType = body.customEventType || defs.customEventType;
+  const objective = merged.objective || defs.objective;
+  const optimizationGoal = merged.optimizationGoal || defs.optimizationGoal;
+  const customEventType = merged.customEventType || defs.customEventType;
 
   const partial = { campaign: null, adset: null, creative: null, ad: null };
 
   try {
     partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, {
-      name: body.campaignName || "Travel Campaign",
+      name: merged.campaignName || "Travel Campaign",
       objective,
-      status: body.status || "PAUSED",
+      status: merged.status || "PAUSED",
       special_ad_categories: [],
     });
 
-    const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(body.dailyBudget || 20));
-    /** Non-empty `targeting` from UI/API replaces defaults; omit or `{}` keeps legacy demo fallback. */
+    const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(merged.dailyBudget || 20));
     let targeting =
-      body.targeting && typeof body.targeting === "object" && Object.keys(body.targeting).length > 0
-        ? body.targeting
-        : {
-            geo_locations: { countries: ["LK"] },
-            age_min: 21,
-            age_max: 55,
-            locales: [1000],
-          };
+      merged.targeting && typeof merged.targeting === "object" && Object.keys(merged.targeting).length > 0
+        ? merged.targeting
+        : defaultTargetingFallback();
 
-    targeting = mergePlacementIntoTargeting(targeting, body);
+    targeting = mergePlacementIntoTargeting(targeting, merged);
 
     const adsetPayload = {
-      name: body.adsetName || "Travel Ad Set",
+      name: merged.adsetName || "Travel Ad Set",
       campaign_id: partial.campaign.id,
       daily_budget: dailyBudgetMinor,
       billing_event: "IMPRESSIONS",
@@ -424,18 +791,18 @@ export async function createCampaignChain(body) {
     partial.adset = await graphPostForm(`/${c.adAccountId}/adsets`, adsetPayload);
 
     partial.creative = await createLinkAdCreative({
-      name: body.creativeName || "Travel Creative",
-      imageHash: body.imageHash,
-      videoId: body.videoId,
-      carouselCards: body.carouselCards,
-      link: body.link,
-      message: body.message,
-      headline: body.headline,
-      description: body.description,
+      name: merged.creativeName || "Travel Creative",
+      imageHash: merged.imageHash,
+      videoId: merged.videoId,
+      carouselCards: merged.carouselCards,
+      link: merged.link,
+      message: merged.message,
+      headline: merged.headline,
+      description: merged.description,
     });
 
     partial.ad = await graphPostForm(`/${c.adAccountId}/ads`, {
-      name: body.adName || "Travel Ad",
+      name: merged.adName || "Travel Ad",
       adset_id: partial.adset.id,
       creative: { creative_id: partial.creative.id },
       status: "PAUSED",
@@ -449,6 +816,94 @@ export async function createCampaignChain(body) {
     };
   } catch (err) {
     await rollbackPartialCampaignChain(partial);
+    throw err;
+  }
+}
+
+async function createCampaignChainMulti(body, specs) {
+  const c = getMetaConfig();
+  const defs = getDefaultCampaignDefaults();
+  const objective = body.objective || defs.objective;
+  const optimizationGoal = body.optimizationGoal || defs.optimizationGoal;
+  const customEventType = body.customEventType || defs.customEventType;
+  const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(body.dailyBudget || 20));
+
+  const partial = { campaign: null, creative: null, pairs: [] };
+
+  try {
+    partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, {
+      name: body.campaignName || "Travel Campaign",
+      objective,
+      status: body.status || "PAUSED",
+      special_ad_categories: [],
+    });
+
+    partial.creative = await createLinkAdCreative({
+      name: body.creativeName || "Travel Creative",
+      imageHash: body.imageHash,
+      videoId: body.videoId,
+      carouselCards: body.carouselCards,
+      link: body.link,
+      message: body.message,
+      headline: body.headline,
+      description: body.description,
+    });
+
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i];
+      let targeting =
+        spec.targeting && typeof spec.targeting === "object" && Object.keys(spec.targeting).length > 0
+          ? spec.targeting
+          : defaultTargetingFallback();
+      targeting = mergePlacementIntoTargeting(targeting, body);
+
+      const adsetPayload = {
+        name: spec.name,
+        campaign_id: partial.campaign.id,
+        daily_budget: dailyBudgetMinor,
+        billing_event: "IMPRESSIONS",
+        optimization_goal: optimizationGoal,
+        bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+        targeting,
+        status: "PAUSED",
+        start_time: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      };
+
+      if (optimizationGoal === "OFFSITE_CONVERSIONS") {
+        if (!c.pixelId) {
+          throw new Error(
+            "META_PIXEL_ID is required for OFFSITE_CONVERSIONS (sales / ROAS). Set pixel or override optimizationGoal/objective."
+          );
+        }
+        adsetPayload.promoted_object = {
+          pixel_id: c.pixelId,
+          custom_event_type: customEventType,
+        };
+      }
+
+      const adset = await graphPostForm(`/${c.adAccountId}/adsets`, adsetPayload);
+      const adName =
+        specs.length > 1 ? `${body.adName || "Travel Ad"} ${i + 1}` : body.adName || "Travel Ad";
+      const ad = await graphPostForm(`/${c.adAccountId}/ads`, {
+        name: adName,
+        adset_id: adset.id,
+        creative: { creative_id: partial.creative.id },
+        status: "PAUSED",
+      });
+      partial.pairs.push({ adset, ad });
+    }
+
+    const first = partial.pairs[0];
+    return {
+      campaign: partial.campaign,
+      creative: partial.creative,
+      adsets: partial.pairs.map((p) => p.adset),
+      ads: partial.pairs.map((p) => p.ad),
+      adset: first.adset,
+      ad: first.ad,
+    };
+  } catch (err) {
+    await rollbackPartialMultiChain(partial);
     throw err;
   }
 }
@@ -473,7 +928,31 @@ export async function setObjectStatus(objectId, status) {
 
 export async function getAdsetById(adsetId) {
   if (!adsetId) throw new Error("adsetId is required");
-  return graphGet(`/${adsetId}`, { fields: "id,name,daily_budget,status" });
+  return graphGet(`/${adsetId}`, { fields: "id,name,daily_budget,status,campaign_id,targeting" });
+}
+
+/** List ads under an ad set (for operator tools / creative swap). */
+export async function getAdsForAdset(adsetId) {
+  if (!adsetId) throw new Error("adsetId is required");
+  return graphGet(`/${adsetId}/ads`, { fields: "id,name,status", limit: 50 });
+}
+
+/**
+ * Deep copy ad set (and ads when supported). Graph returns copied ad set id.
+ * @see https://developers.facebook.com/docs/marketing-api/reference/ad-campaign-group/copies
+ */
+export async function copyAdSetDeep(adsetId, { statusOption = "PAUSED", deepCopy = true } = {}) {
+  if (!adsetId) throw new Error("adsetId is required");
+  return graphPostForm(`/${adsetId}/copies`, {
+    status_option: statusOption,
+    deep_copy: deepCopy ? "true" : "false",
+  });
+}
+
+/** Point an existing ad at a different ad creative id. */
+export async function updateAdCreativeOnAd(adId, creativeId) {
+  if (!adId || !creativeId) throw new Error("adId and creativeId are required");
+  return graphPostForm(`/${adId}`, { creative: { creative_id: String(creativeId) } });
 }
 
 export async function updateAdsetDailyBudget(adsetId, dailyBudgetMinor) {

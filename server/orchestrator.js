@@ -5,8 +5,9 @@ import {
   uploadAdVideoFromFileUrl,
   createCampaignChain,
   extractImageHashFromAdImagesResponse,
-  activateDeliveryChain,
   getDefaultCampaignDefaults,
+  normalizeAdsetSpecs,
+  setObjectStatus,
 } from "./meta-graph.js";
 import { evaluatePublishPolicy } from "./policy.js";
 import {
@@ -115,30 +116,40 @@ export async function runAdPipeline(body) {
     };
 
     let result;
+    const specs = normalizeAdsetSpecs(campaignPayload);
     if (mock) {
       const spend = Number(campaignPayload.dailyBudget || 200);
       const leads = Number(body.expectedLeads || 30);
       const cpa = leads > 0 ? spend / leads : spend;
       const roas = Number(body.expectedRoas || 2.8);
       const campaign = { id: nextId("meta_campaign"), name: campaignPayload.campaignName, status: "PAUSED" };
-      const adset = { id: nextId("meta_adset"), name: campaignPayload.adsetName };
       const creative = { id: nextId("creative"), name: body.creativeName || "Creative" };
-      const ad = { id: nextId("meta_ad"), status: "PAUSED" };
-      result = { campaign, adset, creative, ad, mock: true };
-      state.campaigns.unshift({
+      const adsets = specs.map((s) => ({ id: nextId("meta_adset"), name: s.name }));
+      const ads = specs.map(() => ({ id: nextId("meta_ad"), status: "PAUSED" }));
+      result = {
+        campaign,
+        adset: adsets[0],
+        adsets,
+        ads,
+        creative,
+        ad: ads[0],
+        mock: true,
+      };
+      const rows = adsets.map((as, i) => ({
         id: campaign.id,
         campaign: campaignPayload.campaignName,
-        adset: campaignPayload.adsetName,
+        adset: as.name,
         spend,
         leads,
         cpa,
         roas,
         status: "PAUSED",
         metaCampaignId: campaign.id,
-        metaAdsetId: adset.id,
-        metaAdId: ad.id,
+        metaAdsetId: as.id,
+        metaAdId: ads[i].id,
         metaCreativeId: creative.id,
-      });
+      }));
+      state.campaigns.unshift(...rows.slice().reverse());
       recalculateActions();
     } else {
       result = await createCampaignChain(campaignPayload);
@@ -146,41 +157,48 @@ export async function runAdPipeline(body) {
       const leads = Number(body.expectedLeads || 30);
       const cpa = leads > 0 ? spend / leads : spend;
       const roas = Number(body.expectedRoas || 2.8);
-      state.campaigns.unshift({
+      const adsetsList = Array.isArray(result.adsets) && result.adsets.length ? result.adsets : [result.adset];
+      const adsList = Array.isArray(result.ads) && result.ads.length ? result.ads : [result.ad];
+      const rows = adsetsList.map((as, i) => ({
         id: result.campaign?.id || nextId("cmp"),
         campaign: campaignPayload.campaignName,
-        adset: campaignPayload.adsetName,
+        adset: as?.name || specs[i]?.name,
         spend,
         leads,
         cpa,
         roas,
         status: "PAUSED",
         metaCampaignId: result.campaign?.id,
-        metaAdsetId: result.adset?.id,
-        metaAdId: result.ad?.id,
+        metaAdsetId: as?.id,
+        metaAdId: adsList[i]?.id,
         metaCreativeId: result.creative?.id,
-      });
+      }));
+      state.campaigns.unshift(...rows.slice().reverse());
       recalculateActions();
     }
 
-    await upsertMetaCampaignRecord({
-      campaignName: campaignPayload.campaignName,
-      adsetName: campaignPayload.adsetName,
-      metaCampaignId: result.campaign?.id,
-      metaAdsetId: result.adset?.id,
-      metaAdId: result.ad?.id,
-      metaCreativeId: result.creative?.id,
-    });
-    await upsertPerformanceSample({
-      metaCampaignId: result.campaign?.id,
-      metaAdsetId: result.adset?.id || campaignPayload.adsetName,
-      campaignName: campaignPayload.campaignName,
-      adsetName: campaignPayload.adsetName,
-      spend: Number(campaignPayload.dailyBudget || 0),
-      leads: Number(body.expectedLeads || 0),
-      revenue: Number(body.expectedLeads || 0) * Number(body.expectedRevenuePerLead || 0),
-      currency: body.currency || "USD",
-    });
+    for (let i = 0; i < specs.length; i++) {
+      const as = Array.isArray(result.adsets) && result.adsets[i] ? result.adsets[i] : result.adset;
+      const ad = Array.isArray(result.ads) && result.ads[i] ? result.ads[i] : result.ad;
+      await upsertMetaCampaignRecord({
+        campaignName: campaignPayload.campaignName,
+        adsetName: as?.name || specs[i].name,
+        metaCampaignId: result.campaign?.id,
+        metaAdsetId: as?.id,
+        metaAdId: ad?.id,
+        metaCreativeId: result.creative?.id,
+      });
+      await upsertPerformanceSample({
+        metaCampaignId: result.campaign?.id,
+        metaAdsetId: as?.id || specs[i].name,
+        campaignName: campaignPayload.campaignName,
+        adsetName: as?.name || specs[i].name,
+        spend: Number(campaignPayload.dailyBudget || 0),
+        leads: Number(body.expectedLeads || 0),
+        revenue: Number(body.expectedLeads || 0) * Number(body.expectedRevenuePerLead || 0),
+        currency: body.currency || "USD",
+      });
+    }
 
     let publishResult = null;
     const policy = evaluatePublishPolicy({
@@ -190,14 +208,20 @@ export async function runAdPipeline(body) {
 
     if (body.autoPublish && policy.allowed) {
       if (!mock) {
-        await activateDeliveryChain({
-          campaignId: result.campaign.id,
-          adsetId: result.adset.id,
-          adId: result.ad.id,
-        });
-        publishResult = { status: "ACTIVE", objects: ["campaign", "adset", "ad"] };
-        const row = state.campaigns.find((c) => c.campaign === campaignPayload.campaignName);
-        if (row) row.status = "ACTIVE";
+        const adsetsPub = Array.isArray(result.adsets) && result.adsets.length ? result.adsets : [result.adset];
+        const adsPub = Array.isArray(result.ads) && result.ads.length ? result.ads : [result.ad];
+        await setObjectStatus(result.campaign.id, "ACTIVE");
+        for (let i = 0; i < adsetsPub.length; i++) {
+          await setObjectStatus(adsetsPub[i].id, "ACTIVE");
+          if (adsPub[i]?.id) await setObjectStatus(adsPub[i].id, "ACTIVE");
+        }
+        publishResult = {
+          status: "ACTIVE",
+          objects: ["campaign", ...adsetsPub.map(() => "adset"), ...adsPub.map(() => "ad")],
+        };
+        for (const row of state.campaigns.filter((c) => c.campaign === campaignPayload.campaignName)) {
+          row.status = "ACTIVE";
+        }
       } else {
         publishResult = { status: "ACTIVE", note: "mock activation — no Meta call" };
         const row = state.campaigns.find((c) => c.campaign === campaignPayload.campaignName);

@@ -1,16 +1,26 @@
-import "dotenv/config";
+import "./env-bootstrap.js";
 import http from "node:http";
-import { state, nextId, recalculateActions, toMoney } from "./state.js";
+import { state, nextId, recalculateActions, toMoney, getOptimizerThresholds } from "./state.js";
 import {
   isMetaConfigured,
   getMetaConfig,
   uploadAdImageFromUrl,
+  uploadAdImageFromBase64,
   uploadAdVideoFromFileUrl,
   createLinkAdCreative,
   createCampaignChain,
+  normalizeAdsetSpecs,
   getAdAccountInsights,
+  copyAdSetDeep,
+  updateAdCreativeOnAd,
+  getAdsForAdset,
+  setObjectStatus,
+  updateAdsetDailyBudget,
   extractImageHashFromAdImagesResponse,
   searchTargetingCatalog,
+  normalizeTargetingSearchQuery,
+  fetchAccessTokenDebugInfo,
+  getAccessTokenFingerprint,
 } from "./meta-graph.js";
 import { upsertTargetingCatalogRows, listCachedTargetingSearch } from "./targeting-catalog.js";
 import {
@@ -27,6 +37,7 @@ import {
   getBusinessSummary,
   logAudienceSync,
   recordRevenueRefund,
+  recordInsightsSync,
 } from "./engine-store.js";
 import { mergeInsightsIntoCampaignRows } from "./insights-sync.js";
 import { evaluatePublishPolicy } from "./policy.js";
@@ -38,6 +49,7 @@ import {
 } from "./ad-preview.js";
 import { runLoopTick } from "./loop-engine.js";
 import { scoreCreativesList } from "./creative-score.js";
+import { buildWinnerBoard, buildSplitCompare, buildCreativeRotationHints } from "./dashboard-extras.js";
 import { buildHookMatrix, generateVideoScript } from "./content-templates.js";
 import { startScheduler } from "./scheduler.js";
 import { createCustomAudience, addUsersToCustomAudience } from "./meta-audience.js";
@@ -117,6 +129,51 @@ function validateUrlMaybe(url) {
   }
 }
 
+/** Extract base64 payload from `data:image/...;base64,...` for Meta `bytes` upload. */
+function parseDataUrlToBase64(dataUrl) {
+  const s = String(dataUrl || "");
+  const m = s.match(/^data:image\/[\w+.-]+;base64,([\s\S]+)$/i);
+  return m ? m[1].replace(/\s/g, "") : null;
+}
+
+/** Map in-app funnel labels to Meta CAPI standard `event_name`. */
+function mapTrackEventToCapiName(eventName) {
+  const e = String(eventName || "").toLowerCase();
+  if (e.includes("qualified")) return "Lead";
+  if (e.includes("lead")) return "Lead";
+  if (e.includes("purchase") || e.includes("booking") || e.includes("deal")) return "Purchase";
+  if (e.includes("view") || e === "viewcontent") return "ViewContent";
+  return "ViewContent";
+}
+
+/** Browser + CAPI user_data (fbp/fbc/UA/IP) for better match quality — pair with same eventId as Pixel. */
+function buildCapiUserData(body) {
+  const base = typeof body.userData === "object" && body.userData && !Array.isArray(body.userData) ? { ...body.userData } : {};
+  if (typeof body.fbp === "string" && body.fbp.trim()) base.fbp = body.fbp.trim();
+  if (typeof body.fbc === "string" && body.fbc.trim()) base.fbc = body.fbc.trim();
+  if (typeof body.clientUserAgent === "string" && body.clientUserAgent.trim()) {
+    base.client_user_agent = body.clientUserAgent.trim();
+  }
+  if (typeof body.clientIpAddress === "string" && body.clientIpAddress.trim()) {
+    base.client_ip_address = body.clientIpAddress.trim();
+  }
+  return Object.keys(base).length ? base : undefined;
+}
+
+/** Enrich custom_data so qualified vs raw leads differ in Events Manager. */
+function mergeTrackCustomData(eventName, body) {
+  const e = String(eventName || "").toLowerCase();
+  const base =
+    typeof body.customData === "object" && body.customData && !Array.isArray(body.customData)
+      ? { ...body.customData }
+      : {};
+  if (e.includes("qualified")) {
+    if (base.lead_status == null) base.lead_status = "qualified";
+    if (base.content_category == null) base.content_category = "qualified_lead";
+  }
+  return Object.keys(base).length ? base : undefined;
+}
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let raw = "";
@@ -174,8 +231,22 @@ function parseBodyWithRaw(req) {
 function dashboardPayload() {
   const cfg = getMetaConfig();
   applyPersistedPerformanceToState();
+  recalculateActions();
   const engineSnap = getEngineSnapshot();
   const business = getBusinessSummary();
+  const creativeScoresRaw = scoreCreativesList(
+    state.creatives.map((c) => ({
+      name: c.name,
+      format: c.format,
+      ctr: c.ctr,
+      cpc: c.cpc,
+      cpa: c.cpa,
+      fatigue: c.fatigue,
+      roas: c.roas,
+      qualifiedRate: c.qualifiedRate,
+      bookingRate: c.bookingRate,
+    }))
+  );
   return {
     project: state.project,
     kpis: state.kpis,
@@ -204,10 +275,16 @@ function dashboardPayload() {
       adAccountConfigured: Boolean(cfg.adAccountId),
       pageConfigured: Boolean(cfg.pageId),
       pixelConfigured: Boolean(cfg.pixelId),
+      hasAppId: Boolean(cfg.appId),
+      hasAppSecret: Boolean(cfg.appSecret),
+      tokenFingerprint: getAccessTokenFingerprint(),
       loopApplyMeta: process.env.LOOP_APPLY_META === "true",
       insightsReconcile: true,
       engineDb: process.env.ENGINE_DB_PATH || "data/bot-engine.db",
       marginAwareOptimizer: process.env.MARGIN_AWARE_OPTIMIZER === "true",
+      optimizer: getOptimizerThresholds(),
+      optimizerBlockScaleStaleInsights: process.env.OPTIMIZER_BLOCK_SCALE_STALE_INSIGHTS === "true",
+      optimizerSplitAutoPause: process.env.OPTIMIZER_SPLIT_AUTO_PAUSE === "true",
       demoSeedData:
         process.env.SEED_DEMO_DATA === "true" ||
         (process.env.SEED_DEMO_DATA !== "false" && process.env.NODE_ENV !== "production"),
@@ -217,16 +294,11 @@ function dashboardPayload() {
       useMock: useMockMeta(),
       trackingHealth: engineSnap.trackingHealth,
     }),
-    creativeScores: scoreCreativesList(
-      state.creatives.map((c) => ({
-        name: c.name,
-        format: c.format,
-        ctr: c.ctr,
-        cpc: c.cpc,
-        cpa: c.cpa,
-        fatigue: c.fatigue,
-      }))
-    ),
+    creativeScores: creativeScoresRaw,
+    creativeRotationHints: buildCreativeRotationHints(creativeScoresRaw),
+    winnerBoard: buildWinnerBoard(state.campaigns),
+    splitCompare: buildSplitCompare(state.campaigns),
+    insightsFreshness: engineSnap.insightsFreshness,
     hooks: buildHookMatrix().slice(0, 12),
     adPreview: state.lastAdPreview,
     assets: {
@@ -258,6 +330,11 @@ function dashboardPayload() {
       profitRoas: `${(business.profitRoas ?? 0).toFixed(2)}x`,
       qualifiedRate: `${(business.qualifiedRate * 100).toFixed(1)}%`,
       bookingRate: `${(business.bookingRate * 100).toFixed(1)}%`,
+      refundVolume: toMoney(business.refundVolume ?? 0),
+      grossRevenue: toMoney(business.grossRevenue ?? business.revenue),
+      netRevenue: toMoney(business.netRevenue ?? business.revenue),
+      grossRoas: `${(business.grossRoas ?? 0).toFixed(2)}x`,
+      cancellationRate: `${((business.cancellationRateBookings ?? 0) * 100).toFixed(1)}%`,
     },
   };
 }
@@ -295,7 +372,7 @@ function createServer() {
 
       if (req.method === "GET" && req.url.startsWith("/api/meta/targeting-search")) {
         const url = new URL(req.url, "http://localhost");
-        const q = (url.searchParams.get("q") || "").trim();
+        const q = normalizeTargetingSearchQuery(url.searchParams.get("q") || "");
         const type = (url.searchParams.get("type") || "adinterest").trim();
         const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 25));
         const rawCc = (url.searchParams.get("country_code") || "").trim().toUpperCase();
@@ -320,6 +397,13 @@ function createServer() {
                 metaMode: "mock",
                 results,
                 source: "sqlite_cache",
+                searchStats: {
+                  queryNormalized: q,
+                  graphRawCount: results.length,
+                  afterTypeFilter: results.length,
+                  limitType: "cache",
+                  countryCode: countryCode || undefined,
+                },
                 countryCode: countryCode || undefined,
               });
               return;
@@ -337,13 +421,37 @@ function createServer() {
                 },
               ],
               note: "Mock mode — demo row. Live calls cache results in meta_targeting_catalog (SQLite).",
+              searchStats: {
+                queryNormalized: q,
+                graphRawCount: 1,
+                afterTypeFilter: 1,
+                limitType: "demo",
+                countryCode: countryCode || undefined,
+              },
               countryCode: countryCode || undefined,
             });
             return;
           }
-          const results = await searchTargetingCatalog({ q, type, limit, countryCode: countryCode || undefined });
+          const { results, searchStats } = await searchTargetingCatalog({
+            q,
+            type,
+            limit,
+            countryCode: countryCode || undefined,
+          });
           upsertTargetingCatalogRows(results, type, q, countryCode);
-          sendJson(req, res, 200, { ok: true, metaMode: "live", results, countryCode: countryCode || undefined });
+          const limitTypeEcho =
+            { adinterest: "interests", adbehavior: "behaviors", work_title: "work_positions", work_employer: "work_employers" }[
+              type
+            ] || "interests";
+          sendJson(req, res, 200, {
+            ok: true,
+            metaMode: "live",
+            results,
+            searchStats,
+            requestedType: type,
+            limitType: limitTypeEcho,
+            countryCode: countryCode || undefined,
+          });
         } catch (error) {
           sendJson(req, res, 400, { ok: false, error: error.message });
         }
@@ -366,16 +474,30 @@ function createServer() {
           hasPageId: Boolean(cfg.pageId),
           hasPixelId: Boolean(cfg.pixelId),
           hasInstagramActorId: Boolean(cfg.instagramActorId),
+          hasAppId: Boolean(cfg.appId),
+          hasAppSecret: Boolean(cfg.appSecret),
+          tokenFingerprint: getAccessTokenFingerprint(),
           placementPreset: process.env.META_PLACEMENT_PRESET || "fb_ig_mobile",
           modeHints: hints,
         });
         return;
       }
 
+      if (req.method === "GET" && req.url === "/api/meta/token-status") {
+        try {
+          const info = await fetchAccessTokenDebugInfo();
+          sendJson(req, res, 200, { ok: true, ...info });
+        } catch (error) {
+          sendJson(req, res, 500, { ok: false, error: error.message || String(error) });
+        }
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/api/meta/track") {
         const body = await parseBody(req);
+        const eventId = body.eventId || nextId("evt");
         const item = {
-          eventId: nextId("evt"),
+          eventId,
           eventName: body.eventName || "ViewContent",
           destination: body.destination || "Unknown",
           packageType: body.packageType || "travel",
@@ -383,7 +505,31 @@ function createServer() {
         };
         state.tracking.unshift(item);
         await bumpFunnel(item.eventName);
-        sendJson(req, res, 200, { ok: true, item });
+        let capi = null;
+        const cfg = getMetaConfig();
+        const wantCapi =
+          process.env.TRACK_SYNC_CAPI !== "false" &&
+          body.syncCapi !== false &&
+          !useMockMeta() &&
+          Boolean(cfg.pixelId);
+        if (wantCapi) {
+          try {
+            const customData = mergeTrackCustomData(item.eventName, body);
+            const userData = buildCapiUserData(body);
+            capi = await sendCapiEvent({
+              eventName: mapTrackEventToCapiName(item.eventName),
+              eventId,
+              eventTime: body.eventTime != null ? Number(body.eventTime) : undefined,
+              eventSourceUrl: body.eventSourceUrl || cfg.appBaseUrl,
+              customData,
+              userData,
+              actionSource: body.actionSource || "website",
+            });
+          } catch (err) {
+            capi = { ok: false, error: err.message || String(err) };
+          }
+        }
+        sendJson(req, res, 200, { ok: true, item, capi });
         return;
       }
 
@@ -436,18 +582,28 @@ function createServer() {
       if (req.method === "POST" && req.url === "/api/meta/upload-image") {
         const body = await parseBody(req);
         if (!useMockMeta()) {
-          if (!body.url || typeof body.url !== "string") {
+          const name = body.name || "creative-image";
+          const fromDataUrl = typeof body.url === "string" ? parseDataUrlToBase64(body.url) : null;
+          const fromBytes =
+            typeof body.bytes === "string"
+              ? body.bytes.replace(/\s/g, "")
+              : typeof body.image_base64 === "string"
+                ? body.image_base64.replace(/\s/g, "")
+                : null;
+          const b64 = fromDataUrl || fromBytes;
+          let raw;
+          if (b64) {
+            raw = await uploadAdImageFromBase64(b64, name);
+          } else if (body.url && typeof body.url === "string" && validateUrlMaybe(body.url)) {
+            raw = await uploadAdImageFromUrl(body.url, name);
+          } else {
             sendJson(req, res, 400, {
               ok: false,
-              error: "Live mode requires JSON body: { url: \"https://...\" } (public image URL)",
+              error:
+                "Live mode: send url (https://... public image), or data:image/...;base64,... in url (file picker), or bytes / image_base64 (raw base64)",
             });
             return;
           }
-          if (!validateUrlMaybe(body.url)) {
-            sendJson(req, res, 400, { ok: false, error: "url must be a valid http(s) URL" });
-            return;
-          }
-          const raw = await uploadAdImageFromUrl(body.url, body.name);
           const imageHash = extractImageHashFromAdImagesResponse(raw);
           const image = {
             id: nextId("img"),
@@ -581,6 +737,13 @@ function createServer() {
       if (req.method === "POST" && req.url === "/api/meta/create-campaign") {
         const body = await parseBody(req);
         const carouselCards = Array.isArray(body.carouselCards) ? body.carouselCards.filter(Boolean) : [];
+        let specs;
+        try {
+          specs = normalizeAdsetSpecs(body);
+        } catch (e) {
+          sendJson(req, res, 400, { ok: false, error: e.message || String(e) });
+          return;
+        }
         if (!useMockMeta()) {
           if (!body.imageHash && !body.videoId && carouselCards.length < 2) {
             sendJson(req, res, 400, {
@@ -598,46 +761,52 @@ function createServer() {
           const leads = Number(body.expectedLeads || 30);
           const cpa = leads > 0 ? spend / leads : spend;
           const roas = Number(body.expectedRoas || 2.8);
-          const item = {
-            id: result.campaign?.id || nextId("cmp"),
-            campaign: body.campaignName || "Travel Sales Campaign",
-            adset: body.adsetName || "Travel Adset",
+          const campaignName = body.campaignName || "Travel Sales Campaign";
+          const campaignId = result.campaign?.id || nextId("cmp");
+          const adsetsList = Array.isArray(result.adsets) && result.adsets.length ? result.adsets : [result.adset];
+          const adsList = Array.isArray(result.ads) && result.ads.length ? result.ads : [result.ad];
+          const rows = adsetsList.map((as, i) => ({
+            id: campaignId,
+            campaign: campaignName,
+            adset: as?.name || specs[i]?.name || `Ad Set ${i + 1}`,
             spend,
             leads,
             cpa,
             roas,
             status: "PAUSED",
-          };
-          state.campaigns.unshift({
-            ...item,
             metaCampaignId: result.campaign?.id,
-            metaAdsetId: result.adset?.id,
-            metaAdId: result.ad?.id,
+            metaAdsetId: as?.id,
+            metaAdId: adsList[i]?.id,
             metaCreativeId: result.creative?.id,
-          });
+          }));
+          state.campaigns.unshift(...rows.slice().reverse());
           recalculateActions();
-          await upsertMetaCampaignRecord({
-            campaignName: item.campaign,
-            adsetName: item.adset,
-            metaCampaignId: result.campaign?.id,
-            metaAdsetId: result.adset?.id,
-            metaAdId: result.ad?.id,
-            metaCreativeId: result.creative?.id,
-          });
-          await upsertPerformanceSample({
-            metaCampaignId: result.campaign?.id,
-            metaAdsetId: result.adset?.id,
-            campaignName: item.campaign,
-            adsetName: item.adset,
-            spend,
-            leads,
-            currency: body.currency || "USD",
-          });
+          for (let i = 0; i < rows.length; i++) {
+            await upsertMetaCampaignRecord({
+              campaignName: campaignName,
+              adsetName: rows[i].adset,
+              metaCampaignId: result.campaign?.id,
+              metaAdsetId: rows[i].metaAdsetId,
+              metaAdId: rows[i].metaAdId,
+              metaCreativeId: result.creative?.id,
+            });
+            await upsertPerformanceSample({
+              metaCampaignId: result.campaign?.id,
+              metaAdsetId: rows[i].metaAdsetId,
+              campaignName: campaignName,
+              adsetName: rows[i].adset,
+              spend,
+              leads,
+              currency: body.currency || "USD",
+            });
+          }
           sendJson(req, res, 200, {
             ok: true,
             metaMode: "live",
             campaign: result.campaign,
             adset: result.adset,
+            adsets: result.adsets,
+            ads: result.ads,
             creative: result.creative,
             ad: result.ad,
           });
@@ -647,24 +816,39 @@ function createServer() {
         const leads = Number(body.expectedLeads || 30);
         const cpa = leads > 0 ? spend / leads : spend;
         const roas = Number(body.expectedRoas || 2.8);
-        const item = {
-          id: nextId("cmp"),
-          campaign: body.campaignName || "Travel Sales Campaign",
-          adset: body.adsetName || "Travel Adset",
+        const campaignName = body.campaignName || "Travel Sales Campaign";
+        const campaignId = nextId("meta_campaign");
+        const creativeId = nextId("creative");
+        const mockAdsets = specs.map((s, i) => ({
+          id: nextId("meta_adset"),
+          name: s.name || `Ad Set ${i + 1}`,
+        }));
+        const mockAds = specs.map(() => ({ id: nextId("meta_ad"), status: "PAUSED" }));
+        const rows = mockAdsets.map((as, i) => ({
+          id: campaignId,
+          campaign: campaignName,
+          adset: as.name,
           spend,
           leads,
           cpa,
           roas,
           status: "PAUSED",
-        };
-        state.campaigns.unshift(item);
+          metaCampaignId: campaignId,
+          metaAdsetId: as.id,
+          metaAdId: mockAds[i].id,
+          metaCreativeId: creativeId,
+        }));
+        state.campaigns.unshift(...rows.slice().reverse());
         recalculateActions();
         sendJson(req, res, 200, {
           ok: true,
           metaMode: "mock",
-          campaign: { id: nextId("meta_campaign"), name: item.campaign, status: item.status },
-          adset: { id: nextId("meta_adset"), name: item.adset },
-          ad: { id: nextId("meta_ad"), status: "PAUSED" },
+          campaign: { id: campaignId, name: campaignName, status: "PAUSED" },
+          adset: mockAdsets[0],
+          adsets: mockAdsets,
+          ads: mockAds,
+          creative: { id: creativeId, name: body.creativeName || "Travel Creative" },
+          ad: mockAds[0],
         });
         return;
       }
@@ -718,6 +902,15 @@ function createServer() {
           }
         }
 
+        if (!mock && emails.length === 0) {
+          sendJson(req, res, 400, {
+            ok: false,
+            error:
+              "Live mode requires emails[] for Custom Audience upload. Add emails in the UI textarea or POST body, or set VITE_AUDIENCE_SYNC_EMAILS.",
+          });
+          return;
+        }
+
         const matchedUsers = emails.length > 0 ? emails.length : Math.floor(Math.random() * 800) + 150;
         const existing = state.audiences.find((a) => a.segment === segment);
         if (existing) {
@@ -740,10 +933,9 @@ function createServer() {
           audienceId: nextId("aud"),
           audienceName: body.audienceName || `Travel Audience - ${segment}`,
           matchedUsers,
-          note:
-            mock || !emails.length
-              ? "Provide emails[] in live mode to create/update a real Custom Audience via Marketing API."
-              : undefined,
+          note: mock
+            ? "Mock audience counts are simulated."
+            : "Provide emails[] in live mode to create/update a real Custom Audience via Marketing API.",
         });
         return;
       }
@@ -790,6 +982,7 @@ function createServer() {
           for (const sample of reconcile.samples || []) {
             await upsertPerformanceSample(sample);
           }
+          recordInsightsSync();
           sendJson(req, res, 200, { ok: true, metaMode: "live", raw, reconcile });
           return;
         }
@@ -809,6 +1002,107 @@ function createServer() {
         return;
       }
 
+      if (req.method === "POST" && req.url === "/api/meta/adset/status") {
+        const body = await parseBody(req);
+        if (useMockMeta()) {
+          sendJson(req, res, 200, { ok: true, metaMode: "mock", note: "META_USE_MOCK — no Graph call" });
+          return;
+        }
+        try {
+          const id = String(body.metaAdsetId || "").trim();
+          const status = String(body.status || "PAUSED").toUpperCase();
+          if (!id) throw new Error("metaAdsetId is required");
+          if (status !== "ACTIVE" && status !== "PAUSED") throw new Error("status must be ACTIVE or PAUSED");
+          const result = await setObjectStatus(id, status);
+          sendJson(req, res, 200, { ok: true, metaMode: "live", result });
+        } catch (error) {
+          sendJson(req, res, 502, { ok: false, error: error.message, meta: error.meta });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/api/meta/adset/budget") {
+        const body = await parseBody(req);
+        if (useMockMeta()) {
+          sendJson(req, res, 200, { ok: true, metaMode: "mock", note: "META_USE_MOCK — no Graph call" });
+          return;
+        }
+        try {
+          const id = String(body.metaAdsetId || "").trim();
+          const minor = Number(body.dailyBudgetMinor ?? body.daily_budget_minor);
+          if (!id) throw new Error("metaAdsetId is required");
+          if (!(minor > 0)) throw new Error("dailyBudgetMinor must be > 0");
+          const result = await updateAdsetDailyBudget(id, minor);
+          sendJson(req, res, 200, { ok: true, metaMode: "live", result });
+        } catch (error) {
+          sendJson(req, res, 502, { ok: false, error: error.message, meta: error.meta });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/api/meta/adset/copy") {
+        const body = await parseBody(req);
+        if (useMockMeta()) {
+          sendJson(req, res, 200, {
+            ok: true,
+            metaMode: "mock",
+            note: "META_USE_MOCK — no Graph call",
+            wouldCopy: body.sourceAdsetId,
+          });
+          return;
+        }
+        try {
+          const sourceAdsetId = String(body.sourceAdsetId || "").trim();
+          if (!sourceAdsetId) throw new Error("sourceAdsetId is required");
+          const statusOption = String(body.statusOption || "PAUSED").toUpperCase();
+          const so = statusOption === "ACTIVE" ? "ACTIVE" : "PAUSED";
+          const raw = await copyAdSetDeep(sourceAdsetId, { statusOption: so, deepCopy: body.deepCopy !== false });
+          const copiedId = raw.copied_adset_id || raw.copied_ad_set_id || raw.id || raw.adset_id;
+          sendJson(req, res, 200, { ok: true, metaMode: "live", raw, copiedAdsetId: copiedId });
+        } catch (error) {
+          sendJson(req, res, 502, { ok: false, error: error.message, meta: error.meta });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/api/meta/ad/creative") {
+        const body = await parseBody(req);
+        if (useMockMeta()) {
+          sendJson(req, res, 200, { ok: true, metaMode: "mock", note: "META_USE_MOCK — no Graph call" });
+          return;
+        }
+        try {
+          const adId = String(body.metaAdId || "").trim();
+          const creativeId = String(body.metaCreativeId || "").trim();
+          if (!adId || !creativeId) throw new Error("metaAdId and metaCreativeId are required");
+          const result = await updateAdCreativeOnAd(adId, creativeId);
+          sendJson(req, res, 200, { ok: true, metaMode: "live", result });
+        } catch (error) {
+          sendJson(req, res, 502, { ok: false, error: error.message, meta: error.meta });
+        }
+        return;
+      }
+
+      if (req.method === "GET" && req.url.startsWith("/api/meta/adset/ads")) {
+        const url = new URL(req.url, "http://localhost");
+        const adsetId = String(url.searchParams.get("adsetId") || "").trim();
+        if (!adsetId) {
+          sendJson(req, res, 400, { ok: false, error: "adsetId query param is required" });
+          return;
+        }
+        if (useMockMeta()) {
+          sendJson(req, res, 200, { ok: true, metaMode: "mock", data: { data: [] } });
+          return;
+        }
+        try {
+          const data = await getAdsForAdset(adsetId);
+          sendJson(req, res, 200, { ok: true, metaMode: "live", data });
+        } catch (error) {
+          sendJson(req, res, 502, { ok: false, error: error.message, meta: error.meta });
+        }
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/api/meta/optimize") {
         const out = await runLoopTick();
         sendJson(req, res, 200, { ok: true, ...out, metaMode: useMockMeta() ? "mock" : "live" });
@@ -818,7 +1112,14 @@ function createServer() {
       if (req.method === "POST" && req.url === "/api/crm/webhook") {
         const { raw, json: body } = await parseBodyWithRaw(req);
         if (!verifyCrmWebhookSignature(raw, req.headers["x-webhook-signature"], CRM_WEBHOOK_SECRET)) {
-          sendJson(req, res, 401, { ok: false, error: "Invalid webhook signature" });
+          sendJson(req, res, 401, {
+            ok: false,
+            error: "Invalid webhook signature",
+            hint:
+              CRM_WEBHOOK_SECRET
+                ? "Send header X-Webhook-Signature: sha256=<hex> where hex = HMAC-SHA256(secret, raw body)."
+                : "Set CRM_WEBHOOK_SECRET in env to enforce signatures; while unset, verification is skipped.",
+          });
           return;
         }
         const eventType = body.eventType || "lead.created";
@@ -830,7 +1131,11 @@ function createServer() {
         }
         await appendCrmLog({ eventType, payload: body });
         await bumpFunnel(eventType);
-        sendJson(req, res, 200, { ok: true, received: eventType });
+        sendJson(req, res, 200, {
+          ok: true,
+          received: eventType,
+          signatureMode: CRM_WEBHOOK_SECRET ? "enforced" : "skipped (CRM_WEBHOOK_SECRET unset)",
+        });
         return;
       }
 

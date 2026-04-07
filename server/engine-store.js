@@ -19,6 +19,7 @@ const defaultPersisted = () => ({
     booking: 0,
   },
   trackingHealth: 0.85,
+  lastInsightsSyncAt: null,
   metaCampaigns: [],
   revenueEvents: [],
   crmQualityEvents: [],
@@ -100,6 +101,7 @@ function loadPersistedFromDb() {
         }
       : defaultPersisted().funnel,
     trackingHealth: settings?.tracking_health ?? 0.85,
+    lastInsightsSyncAt: settings?.last_insights_sync_at || null,
     metaCampaigns,
     revenueEvents,
     crmQualityEvents,
@@ -578,6 +580,17 @@ export function getBusinessSummary() {
   const leads = byAdset.reduce((a, r) => a + Number(r.leads || 0), 0);
   const qualifiedLeads = byAdset.reduce((a, r) => a + Number(r.qualifiedLeads || 0), 0);
   const bookings = byAdset.reduce((a, r) => a + Number(r.bookings || 0), 0);
+  let refundCount = 0;
+  let refundVolume = 0;
+  let refundCancelledBookings = 0;
+  for (const e of persisted.revenueEvents || []) {
+    if (e.refunded) {
+      refundCount += 1;
+      refundVolume += Number(e.refundAmount || 0);
+      if (e.cancelBooking !== false) refundCancelledBookings += 1;
+    }
+  }
+  const grossRevenue = revenue + refundVolume;
   return {
     spend,
     revenue,
@@ -590,7 +603,43 @@ export function getBusinessSummary() {
     profitRoas: spend > 0 ? grossProfit / spend : 0,
     qualifiedRate: leads > 0 ? qualifiedLeads / leads : 0,
     bookingRate: leads > 0 ? bookings / leads : 0,
+    refundCount,
+    refundVolume,
+    grossRevenue,
+    netRevenue: revenue,
+    refundAdjustedRoas: spend > 0 ? revenue / spend : 0,
+    grossRoas: spend > 0 && grossRevenue > 0 ? grossRevenue / spend : 0,
+    cancellationRateBookings:
+      bookings + refundCancelledBookings > 0
+        ? refundCancelledBookings / (bookings + refundCancelledBookings)
+        : 0,
   };
+}
+
+/** Persist successful Meta insights pull time (GET /api/meta/insights live path). */
+export function recordInsightsSync() {
+  const db = getDb();
+  const iso = new Date().toISOString();
+  db.prepare(`UPDATE engine_settings SET last_insights_sync_at = ? WHERE id = 1`).run(iso);
+  persisted = loadPersistedFromDb();
+}
+
+/**
+ * Age of last insights sync vs OPTIMIZER_MAX_INSIGHTS_AGE_MS (default 6h).
+ * Used for dashboard warnings and optional scale blocking in the loop.
+ */
+export function getInsightsFreshness() {
+  const maxAgeMs = Number(process.env.OPTIMIZER_MAX_INSIGHTS_AGE_MS || 21600000);
+  const raw = persisted.lastInsightsSyncAt;
+  if (!raw) {
+    return { lastSyncedAt: null, ageMs: null, stale: true, maxAgeMs };
+  }
+  const t = new Date(raw).getTime();
+  if (Number.isNaN(t)) {
+    return { lastSyncedAt: raw, ageMs: null, stale: true, maxAgeMs };
+  }
+  const ageMs = Date.now() - t;
+  return { lastSyncedAt: raw, ageMs, stale: ageMs > maxAgeMs, maxAgeMs };
 }
 
 export function getEngineSnapshot() {
@@ -600,6 +649,7 @@ export function getEngineSnapshot() {
     crmLog: persisted.crmLog.slice(0, 30),
     funnel: persisted.funnel,
     trackingHealth: persisted.trackingHealth,
+    insightsFreshness: getInsightsFreshness(),
     metaCampaignsPersisted: (persisted.metaCampaigns || []).length,
     revenueEvents: persisted.revenueEvents.slice(0, 40),
     crmQualityEvents: persisted.crmQualityEvents.slice(0, 60),

@@ -218,6 +218,65 @@ body {
   resize: vertical;
 }
 
+.multi-adset-panel {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.multi-adset-panel select#multiAdsetCount {
+  margin-top: 6px;
+  max-width: 200px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.multi-adset-explainer {
+  margin: 8px 0 12px;
+}
+
+.adset-slots-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.adset-slot-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(17, 31, 53, 0.45);
+}
+
+.adset-slot-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--brand);
+}
+
+.adset-slot-card .budget-field {
+  max-width: 100%;
+}
+
+.adset-slot-card textarea {
+  width: 100%;
+  min-height: 72px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  resize: vertical;
+}
+
 .targeting-countries-label {
   max-width: 100%;
 }
@@ -420,6 +479,28 @@ body {
   align-items: center;
 }
 
+.targeting-insert-slot-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.targeting-insert-slot-label select {
+  max-width: 200px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.adset-insert-picks {
+  margin-top: 8px;
+}
+
 .creatives-delivery-note h3 {
   margin-top: 0;
 }
@@ -530,6 +611,70 @@ button.btn-ghost:hover {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.split.three-col {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.compact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.compact-table th,
+.compact-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.campaign-health-table {
+  font-size: 13px;
+}
+
+.campaign-health-table th,
+.campaign-health-table td {
+  vertical-align: middle;
+}
+
+.campaign-actions {
+  white-space: nowrap;
+}
+
+.campaign-actions .btn-tiny {
+  font-size: 12px;
+  padding: 4px 8px;
+  margin-right: 4px;
+}
+
+.adset-budget-row {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.adset-budget-minor {
+  width: 100px;
+}
+
+.leaderboard {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.split-worst td {
+  background: rgba(220, 80, 80, 0.06);
+}
+
+.badge-warn {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(220, 140, 40, 0.2);
+  color: var(--text);
 }
 
 h3 {
@@ -1001,6 +1146,10 @@ th {
   }
 
   .split {
+    grid-template-columns: 1fr;
+  }
+
+  .split.three-col {
     grid-template-columns: 1fr;
   }
 
