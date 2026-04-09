@@ -1,0 +1,15 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# • If you already have a Web Service, set `name` below to match it (Dashboard → service name).
+# • Sync: Dashboard → your service → Settings → Blueprint, or create from repo with this file.
+# • Do NOT use `npm run dev:all` as Start Command — it runs Vite + API and fails on Render.
+
+services:
+  - type: web
+    name: facebook-marketing-app
+    runtime: node
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
