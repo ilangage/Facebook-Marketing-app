@@ -1257,10 +1257,15 @@ function createServer() {
 
 const server = createServer();
 
-/** Render requires listening on all interfaces; local dev uses Node default when unset. */
+/** PaaS (Render, Fly, Railway) must bind 0.0.0.0 for external routing; local dev uses Node default when unset. */
 function listenHostForPlatform() {
   if (process.env.BIND_HOST) return process.env.BIND_HOST;
-  return process.env.RENDER === "true" ? "0.0.0.0" : undefined;
+  const cloud =
+    process.env.RENDER === "true" ||
+    process.env.FLY_APP_NAME ||
+    process.env.RAILWAY_ENVIRONMENT === "production";
+  if (cloud || process.env.NODE_ENV === "production") return "0.0.0.0";
+  return undefined;
 }
 
 process.on("unhandledRejection", (reason, p) => {
