@@ -379,8 +379,10 @@ function createServer() {
     }
 
     try {
-      const pathname = req.url.split("?")[0] || "";
-      if (req.method === "GET" && (pathname === "/" || pathname === "")) {
+      /** Ignore query string and trailing slash so `/api/meta/token-status?x=1` and `/api/meta/health/` match. */
+      let apiPath = (req.url || "").split("?")[0] || "/";
+      if (apiPath.length > 1 && apiPath.endsWith("/")) apiPath = apiPath.slice(0, -1);
+      if (req.method === "GET" && (apiPath === "/" || apiPath === "")) {
         sendJson(req, res, 200, { ok: true, service: "facebook-marketing-api" });
         return;
       }
@@ -398,12 +400,12 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/dashboard/state") {
+      if (req.method === "GET" && apiPath === "/api/dashboard/state") {
         sendJson(req, res, 200, { ok: true, ...dashboardPayload() });
         return;
       }
 
-      if (req.method === "GET" && req.url.startsWith("/api/meta/targeting-search")) {
+      if (req.method === "GET" && apiPath.startsWith("/api/meta/targeting-search")) {
         const url = new URL(req.url, "http://localhost");
         const q = normalizeTargetingSearchQuery(url.searchParams.get("q") || "");
         const type = (url.searchParams.get("type") || "adinterest").trim();
@@ -491,7 +493,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/meta/health") {
+      if (req.method === "GET" && apiPath === "/api/meta/health") {
         const cfg = getMetaConfig();
         const { hints } = getMetaModeHints();
         sendJson(req, res, 200, {
@@ -518,7 +520,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/meta/token-status") {
+      if (req.method === "GET" && apiPath === "/api/meta/token-status") {
         try {
           const info = await fetchAccessTokenDebugInfo();
           sendJson(req, res, 200, { ok: true, ...info });
@@ -528,7 +530,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/track") {
+      if (req.method === "POST" && apiPath === "/api/meta/track") {
         const body = await parseBody(req);
         const eventId = body.eventId || nextId("evt");
         const item = {
@@ -568,27 +570,27 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/pipeline/run") {
+      if (req.method === "POST" && apiPath === "/api/pipeline/run") {
         const body = await parseBody(req);
         const result = await runAdPipeline(body);
         sendJson(req, res, 200, result);
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/preview/render") {
+      if (req.method === "POST" && apiPath === "/api/preview/render") {
         const body = await parseBody(req);
         applyAdPreviewFromBody(body, {});
         sendJson(req, res, 200, { ok: true, adPreview: state.lastAdPreview });
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/loop/tick") {
+      if (req.method === "POST" && apiPath === "/api/loop/tick") {
         const result = await runLoopTick();
         sendJson(req, res, 200, result);
         return;
       }
 
-      if (req.method === "GET" && req.url.startsWith("/api/content/video-script")) {
+      if (req.method === "GET" && apiPath.startsWith("/api/content/video-script")) {
         const url = new URL(req.url, "http://localhost");
         const persona = url.searchParams.get("persona") || "honeymoon";
         const destination = url.searchParams.get("destination") || "Bali";
@@ -597,7 +599,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/policy") {
+      if (req.method === "GET" && apiPath === "/api/policy") {
         sendJson(req, res, 200, {
           ok: true,
           ...evaluatePublishPolicy({
@@ -608,13 +610,13 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/business/summary") {
+      if (req.method === "GET" && apiPath === "/api/business/summary") {
         const b = getBusinessSummary();
         sendJson(req, res, 200, { ok: true, ...b });
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/upload-image") {
+      if (req.method === "POST" && apiPath === "/api/meta/upload-image") {
         const body = await parseBody(req);
         if (!useMockMeta()) {
           const name = body.name || "creative-image";
@@ -674,7 +676,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/upload-video") {
+      if (req.method === "POST" && apiPath === "/api/meta/upload-video") {
         const body = await parseBody(req);
         if (!useMockMeta()) {
           const fileUrl = body.file_url || body.fileUrl;
@@ -725,7 +727,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/create-creative") {
+      if (req.method === "POST" && apiPath === "/api/meta/create-creative") {
         const body = await parseBody(req);
         const carouselCards = Array.isArray(body.carouselCards) ? body.carouselCards.filter(Boolean) : [];
         if (!body.imageHash && !body.videoId && carouselCards.length < 2) {
@@ -778,7 +780,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/create-campaign") {
+      if (req.method === "POST" && apiPath === "/api/meta/create-campaign") {
         const body = await parseBody(req);
         const carouselCards = Array.isArray(body.carouselCards) ? body.carouselCards.filter(Boolean) : [];
         let specs;
@@ -906,7 +908,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/sync-audience") {
+      if (req.method === "POST" && apiPath === "/api/meta/sync-audience") {
         const body = await parseBody(req);
         const segment = body.segment || "hot";
         const emails = Array.isArray(body.emails) ? body.emails.filter((e) => typeof e === "string" && e.trim()) : [];
@@ -993,7 +995,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/capi/event") {
+      if (req.method === "POST" && apiPath === "/api/meta/capi/event") {
         const body = await parseBody(req);
         if (useMockMeta()) {
           sendJson(req, res, 200, {
@@ -1021,14 +1023,14 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/meta/capi/log") {
+      if (req.method === "GET" && apiPath === "/api/meta/capi/log") {
         const url = new URL(req.url, "http://localhost");
         const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 40)));
         sendJson(req, res, 200, { ok: true, events: listRecentCapiEvents(limit) });
         return;
       }
 
-      if (req.method === "GET" && req.url === "/api/meta/insights") {
+      if (req.method === "GET" && apiPath === "/api/meta/insights") {
         if (!useMockMeta()) {
           const raw = await getAdAccountInsights();
           const reconcile = mergeInsightsIntoCampaignRows(raw);
@@ -1055,7 +1057,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/adset/status") {
+      if (req.method === "POST" && apiPath === "/api/meta/adset/status") {
         const body = await parseBody(req);
         if (useMockMeta()) {
           sendJson(req, res, 200, { ok: true, metaMode: "mock", note: "META_USE_MOCK — no Graph call" });
@@ -1074,7 +1076,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/adset/budget") {
+      if (req.method === "POST" && apiPath === "/api/meta/adset/budget") {
         const body = await parseBody(req);
         if (useMockMeta()) {
           sendJson(req, res, 200, { ok: true, metaMode: "mock", note: "META_USE_MOCK — no Graph call" });
@@ -1093,7 +1095,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/adset/copy") {
+      if (req.method === "POST" && apiPath === "/api/meta/adset/copy") {
         const body = await parseBody(req);
         if (useMockMeta()) {
           sendJson(req, res, 200, {
@@ -1118,7 +1120,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/ad/creative") {
+      if (req.method === "POST" && apiPath === "/api/meta/ad/creative") {
         const body = await parseBody(req);
         if (useMockMeta()) {
           sendJson(req, res, 200, { ok: true, metaMode: "mock", note: "META_USE_MOCK — no Graph call" });
@@ -1136,7 +1138,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "GET" && req.url.startsWith("/api/meta/adset/ads")) {
+      if (req.method === "GET" && apiPath.startsWith("/api/meta/adset/ads")) {
         const url = new URL(req.url, "http://localhost");
         const adsetId = String(url.searchParams.get("adsetId") || "").trim();
         if (!adsetId) {
@@ -1156,13 +1158,13 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/meta/optimize") {
+      if (req.method === "POST" && apiPath === "/api/meta/optimize") {
         const out = await runLoopTick();
         sendJson(req, res, 200, { ok: true, ...out, metaMode: useMockMeta() ? "mock" : "live" });
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/crm/webhook") {
+      if (req.method === "POST" && apiPath === "/api/crm/webhook") {
         const { raw, json: body } = await parseBodyWithRaw(req);
         if (!verifyCrmWebhookSignature(raw, req.headers["x-webhook-signature"], CRM_WEBHOOK_SECRET)) {
           sendJson(req, res, 401, {
@@ -1192,7 +1194,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/crm/quality") {
+      if (req.method === "POST" && apiPath === "/api/crm/quality") {
         const body = await parseBody(req);
         const result = await recordCrmQualityEvent({
           leadId: body.leadId,
@@ -1208,7 +1210,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/revenue/record") {
+      if (req.method === "POST" && apiPath === "/api/revenue/record") {
         const body = await parseBody(req);
         const result = await recordRevenueEvent({
           orderId: body.orderId,
@@ -1227,7 +1229,7 @@ function createServer() {
         return;
       }
 
-      if (req.method === "POST" && req.url === "/api/revenue/refund") {
+      if (req.method === "POST" && apiPath === "/api/revenue/refund") {
         const body = await parseBody(req);
         try {
           const result = await recordRevenueRefund({
@@ -1351,6 +1353,13 @@ async function boot() {
     `Bot backend running on port ${listenPort} (host ${hostLabel}) — ${listenHost ? "0.0.0.0 = all interfaces (Render)" : "Node default bind"}`
   );
   console.log(`Meta mode: ${useMockMeta() ? "MOCK (set META_ACCESS_TOKEN + META_AD_ACCOUNT_ID for live)" : "LIVE"}`);
+  {
+    const cfg = getMetaConfig();
+    const fp = getAccessTokenFingerprint();
+    console.log(
+      `Meta keys: token fp ${fp || "—"} · hasAppId=${Boolean(cfg.appId)} hasAppSecret=${Boolean(cfg.appSecret)} (GET /api/meta/token-status needs app id+secret for debug_token)`
+    );
+  }
   console.log(`Engine DB: ${process.env.ENGINE_DB_PATH || "data/bot-engine.db"}`);
   if (listenPort !== PORT) {
     console.warn(`Listening on ${listenPort} (requested ${PORT}). Match VITE_API_BASE in .env to http://localhost:${listenPort}`);

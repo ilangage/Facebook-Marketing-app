@@ -682,42 +682,6 @@ h3 {
   font-size: 16px;
 }
 
-.assets-heading {
-  margin: 16px 0 8px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--muted);
-}
-
-.assets-table {
-  width: 100%;
-  margin-top: 8px;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.assets-table th,
-.assets-table td {
-  border-bottom: 1px solid var(--line);
-  padding: 8px 6px;
-  text-align: left;
-}
-
-.ad-build-card .ad-build-lead {
-  margin: 0 0 12px;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.45;
-}
-
-.ad-build-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
 .funnel,
 .alerts {
   list-style: none;

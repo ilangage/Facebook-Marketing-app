@@ -712,8 +712,6 @@ const endpoints = [
   "/api/meta/token-status",
   "/api/meta/targeting-search",
   "/api/meta/track",
-  "/api/meta/upload-image",
-  "/api/meta/upload-video",
   "/api/meta/create-creative",
   "/api/meta/sync-audience",
   "/api/meta/create-campaign",
@@ -759,38 +757,6 @@ const dashboard = {
 const app = document.querySelector("#app");
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3001";
 
-/** Short blob: URL for local file preview (avoids huge data: URLs in DOM / JSON). */
-let previewImageBlobUrl = null;
-
-function revokePreviewImageBlob() {
-  if (previewImageBlobUrl) {
-    try {
-      URL.revokeObjectURL(previewImageBlobUrl);
-    } catch {
-      /* ignore */
-    }
-    previewImageBlobUrl = null;
-  }
-}
-
-function applyLocalPreviewImageBlob() {
-  if (previewImageBlobUrl && dashboard.adPreview) {
-    const prev = dashboard.adPreview;
-    const cc = Array.isArray(prev.carouselCards) ? prev.carouselCards : [];
-    dashboard.adPreview = {
-      ...prev,
-      mediaUrl: previewImageBlobUrl,
-      carouselCards:
-        cc.length > 0
-          ? cc.map((card) => ({
-              ...card,
-              imageUrl: previewImageBlobUrl,
-              url: previewImageBlobUrl,
-            }))
-          : prev.carouselCards,
-    };
-  }
-}
 /** Must match server API_KEY when POST auth is enabled (never commit real secrets). */
 const CLIENT_API_KEY = import.meta.env.VITE_API_KEY || "";
 /** Comma/space-separated emails appended to Sync Hot/Warm POST body for live Custom Audience upload. */
@@ -1155,40 +1121,6 @@ function creativeRotationSectionHtml() {
   </article>`;
 }
 
-/** Rows for Meta upload-image / upload-video results (dashboard.assets). */
-function uploadAssetsRows() {
-  const a = dashboard.assets || { images: [], videos: [], adcreatives: [] };
-  const rows = [];
-  for (const img of a.images || []) {
-    rows.push({
-      type: "Image",
-      name: img.name || "—",
-      id: img.imageHash || img.id || "—",
-      status: img.status || "—",
-    });
-  }
-  for (const vid of a.videos || []) {
-    rows.push({
-      type: "Video",
-      name: vid.name || "—",
-      id: vid.videoId || vid.id || "—",
-      status: vid.status || "—",
-    });
-  }
-  for (const cr of a.adcreatives || []) {
-    rows.push({
-      type: "Creative",
-      name: cr.name || "—",
-      id: cr.id || "—",
-      status: cr.status || "—",
-    });
-  }
-  if (!rows.length) {
-    return `<tr><td colspan="4">No uploads yet — click Upload Image or Upload Video.</td></tr>`;
-  }
-  return tableRows(rows, ["type", "name", "id", "status"]);
-}
-
 function render() {
   if (appState.loading) {
     app.innerHTML = `<div class="loading">Loading backend data from ${API_BASE}...</div>`;
@@ -1537,9 +1469,8 @@ function render() {
             <h3>Publish &amp; delivery need an ad set</h3>
             <p>
               On Meta, delivery is <strong>Campaign → Ad set (budget) → Ad → Creative</strong>. This tab is for
-              <strong>creative assets + copy + preview</strong> only. “Create ad creative from last upload”
-              makes a <strong>creative</strong> in Meta — it does not attach an ad to an ad set or turn on
-              delivery by itself.
+              <strong>copy + preview</strong> (hero image/video URL + carousel JSON). Publishing still needs an
+              ad set — use <strong>Campaigns</strong> or <strong>Automation</strong>.
             </p>
             <p class="meta-pill">To create an ad set, set budget, and optionally publish: use <strong>Campaigns</strong> or <strong>Automation → Pipeline</strong>.</p>
             <div class="creatives-jump-row">
@@ -1596,34 +1527,6 @@ function render() {
                 ["name", "score", "tier"]
               )}</tbody>
             </table>
-          </article>
-          <article class="card ad-build-card">
-            <h3>Upload &amp; build</h3>
-            <p class="ad-build-lead">Hook + Problem + Offer + Proof + CTA — each image upload sets the <strong>carousel hero + three package cards</strong> (same image) in the preview above, and syncs the Meta asset list. Strip cards are manual (no auto-slide).</p>
-            <p class="meta-pill">
-              Mock: choose a file or sample URL. Live: file picker sends <code>data:image/…;base64,…</code> (server uploads via Graph
-              <code>bytes</code>) or use a public <code>https://</code> URL.
-            </p>
-            <input type="file" id="imageFileInput" accept="image/*" hidden aria-hidden="true" />
-            <div class="ad-build-row">
-              <button type="button" id="imageButton">Choose image file…</button>
-              <button type="button" id="imageDemoUrlButton" class="btn-ghost">Sample URL (demo)</button>
-              <button type="button" id="videoButton">Upload video (sample URL)</button>
-            </div>
-            <h4 class="assets-heading">Session uploads (library)</h4>
-            <table class="assets-table">
-              <thead>
-                <tr><th>Type</th><th>Name</th><th>Hash / ID</th><th>Status</th></tr>
-              </thead>
-              <tbody>${uploadAssetsRows()}</tbody>
-            </table>
-            <h4 class="assets-heading">Creative only (not full delivery)</h4>
-            <p class="meta-pill">
-              Creates a Meta <strong>ad creative</strong> from the latest <code>imageHash</code> and preview copy.
-              For live delivery you still need an <strong>ad set + ad</strong> — see the note at the top of this tab or
-              <button type="button" class="btn-ghost jump-view-btn" data-view="automation">Automation</button>.
-            </p>
-            <button type="button" id="createCreativeFromUploadButton">Create ad creative from last upload</button>
           </article>
         </section>
 
@@ -2131,106 +2034,6 @@ function bindEvents() {
     appState.audienceSyncEmailsDraft = e.target.value;
   });
 
-  const imageFileInput = document.querySelector("#imageFileInput");
-  const imageButton = document.querySelector("#imageButton");
-  if (imageButton && imageFileInput) {
-    imageButton.addEventListener("click", () => imageFileInput.click());
-  }
-  if (imageFileInput) {
-    imageFileInput.addEventListener("change", (e) => {
-      const file = e.target.files?.[0];
-      e.target.value = "";
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const dataUrl = reader.result;
-        if (typeof dataUrl === "string" && dataUrl.length > 900_000) {
-          appState.error = "Image too large for JSON upload (~max 600KB). Compress or use “Sample URL (demo)”.";
-          render();
-          return;
-        }
-        revokePreviewImageBlob();
-        previewImageBlobUrl = URL.createObjectURL(file);
-        try {
-          const result = await apiFetch("/api/meta/upload-image", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: file.name.replace(/[^\w.\-]+/g, "_") || "creative-hero",
-              url: dataUrl,
-            }),
-          });
-          dashboard.assets = dashboard.assets || { images: [], videos: [], adcreatives: [] };
-          if (result?.ok && result.image) {
-            dashboard.assets.images.unshift({
-              id: result.image.id,
-              name: result.image.name,
-              imageHash: result.image.imageHash,
-              status: result.image.status,
-            });
-          }
-          if (result?.adPreview) {
-            dashboard.adPreview = {
-              ...result.adPreview,
-              mediaUrl: previewImageBlobUrl,
-            };
-          }
-          await loadDashboard({ soft: true });
-          applyLocalPreviewImageBlob();
-        } catch (err) {
-          revokePreviewImageBlob();
-          appState.error = err.message || String(err);
-          render();
-        }
-      };
-      reader.onerror = () => {
-        appState.error = "Could not read file.";
-        render();
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-  const imageDemoUrlButton = document.querySelector("#imageDemoUrlButton");
-  if (imageDemoUrlButton) {
-    imageDemoUrlButton.addEventListener("click", () =>
-      runAction("/api/meta/upload-image", {
-        name: "creative-hero",
-        url: "https://picsum.photos/seed/travelads/1200/628",
-      })
-    );
-  }
-
-  const createCreativeFromUploadButton = document.querySelector("#createCreativeFromUploadButton");
-  if (createCreativeFromUploadButton) {
-    createCreativeFromUploadButton.addEventListener("click", () => {
-      const img = dashboard.assets?.images?.[0];
-      if (!img?.imageHash) {
-        appState.error = "Upload an image first — session library is empty.";
-        render();
-        return;
-      }
-      const prev = dashboard.adPreview || {};
-      runAction("/api/meta/create-creative", {
-        name: `Creative — ${img.name || "upload"}`,
-        imageHash: img.imageHash,
-        link: prev.linkUrl || "https://example.com/travel-offer",
-        message: prev.primaryText,
-        headline: prev.headline,
-        description: prev.description,
-      });
-    });
-  }
-
-  const videoButton = document.querySelector("#videoButton");
-  if (videoButton) {
-    videoButton.addEventListener("click", () =>
-      runAction("/api/meta/upload-video", {
-        name: "creative-reel",
-        file_url: "https://download.samplelib.com/mp4/sample-5s.mp4",
-      })
-    );
-  }
-
   const syncHotButton = document.querySelector("#syncHotButton");
   if (syncHotButton)
     syncHotButton.addEventListener("click", () => runAction("/api/meta/sync-audience", buildSyncAudienceBody("hot")));
@@ -2417,7 +2220,6 @@ function bindEvents() {
             carouselCards.length > 0 ? JSON.parse(JSON.stringify(carouselCards)) : (fromApi?.carouselCards ?? []),
         };
         persistCarouselCardsEditor(dashboard.adPreview.carouselCards || []);
-        applyLocalPreviewImageBlob();
         render();
       } catch (error) {
         appState.error = error.message;
@@ -2495,12 +2297,6 @@ async function apiFetch(path, options = {}) {
 
 async function runAction(path, body) {
   try {
-    if (path === "/api/meta/upload-image" && typeof body?.url === "string" && body.url.startsWith("http")) {
-      revokePreviewImageBlob();
-    }
-    if (path === "/api/meta/upload-video") {
-      revokePreviewImageBlob();
-    }
     const result = await apiFetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2568,7 +2364,6 @@ async function loadDashboard(opts = {}) {
         carouselCards: mergeAdPreviewCarouselCards(data.adPreview, dashboard),
       };
     }
-    applyLocalPreviewImageBlob();
     dashboard.business = data.business || dashboard.business;
     // Keep prior uploads if API response omits `assets` (stale server) or merge server truth when present.
     dashboard.assets =
