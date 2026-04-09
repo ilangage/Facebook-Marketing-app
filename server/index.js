@@ -1248,11 +1248,14 @@ function createServer() {
       sendJson(req, res, 404, { ok: false, error: "Route not found" });
     } catch (error) {
       const status = error.code === "AD_COPY_VALIDATION" ? 400 : 500;
-      sendJson(req, res, status, {
+      const payload = {
         ok: false,
         error: error.message || "Internal server error",
         meta: error.meta || undefined,
-      });
+      };
+      if (error.campaignChainStage) payload.stage = error.campaignChainStage;
+      if (error.campaignChainAdsetIndex != null) payload.stageAdsetIndex = error.campaignChainAdsetIndex;
+      sendJson(req, res, status, payload);
     }
   });
 }

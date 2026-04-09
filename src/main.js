@@ -2262,8 +2262,14 @@ Which API? You are calling: ${API_BASE}
 
 /** If the API returns `{ error, meta }` from Graph, merge user_msg / blame fields (server usually inlines these into `error` now). */
 function appendApiErrorMeta(message, data) {
+  let out = message;
+  if (data?.stage && typeof data.stage === "string" && !String(message).includes(data.stage)) {
+    const idx = data.stageAdsetIndex;
+    const slot = typeof idx === "number" && !Number.isNaN(idx) ? ` · ad set #${idx + 1}` : "";
+    out = `${message}\n\n[chain stage: ${data.stage}${slot}]`;
+  }
   const m = data?.meta;
-  if (!m || typeof m !== "object") return message;
+  if (!m || typeof m !== "object") return out;
   const bits = [];
   const um = m.error_user_msg;
   if (um && String(um).trim() && !String(message).includes(String(um).trim())) bits.push(String(um).trim());
@@ -2278,8 +2284,8 @@ function appendApiErrorMeta(message, data) {
   if (m.code != null && bits.length === 0) {
     bits.push(`Graph code ${m.code}${m.error_subcode != null ? ` subcode ${m.error_subcode}` : ""}`);
   }
-  if (!bits.length) return message;
-  return `${message}\n\n${bits.join(" ")}`;
+  if (!bits.length) return out;
+  return `${out}\n\n${bits.join(" ")}`;
 }
 
 async function apiFetch(path, options = {}) {

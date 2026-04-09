@@ -12,14 +12,19 @@ const ROOT = path.join(__dirname, "..");
 /** Full bot snapshot: UI, API, configs, legal pages, tests. */
 const FILES = [
   "package.json",
+  "package-lock.json",
   "index.html",
   "vite.config.js",
   "vercel.json",
   "vitest.config.js",
+  "render.yaml",
+  ".nvmrc",
   "src/main.js",
   "src/creative-meta-specs.js",
   "src/style.css",
   "src/counter.js",
+  "src/assets/vite.svg",
+  "src/assets/javascript.svg",
   "server/index.js",
   "server/env-bootstrap.js",
   "server/state.js",
@@ -72,7 +77,7 @@ async function main() {
 
   const out = {
     document: "my-project-source-snapshot",
-    version: "1.4.0",
+    version: "1.5.0",
     description_si:
       "Vite UI + Node API (travel-roi bot) — full source snapshot embedded for backup / portability.",
     generatedAt: new Date().toISOString(),

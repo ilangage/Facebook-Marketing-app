@@ -820,6 +820,19 @@ export async function createLinkAdCreative(payload) {
 }
 
 /**
+ * Tags Graph errors from createCampaignChain* so clients can see which step failed (e.g. Meta #3 at create_campaign).
+ * @param {unknown} err
+ * @param {string} stage — create_campaign | ensure_campaign_budget | create_adset | create_creative | create_ad
+ * @param {number} [adsetIndex] — multi-chain only, 0-based slot when stage is create_adset or create_ad
+ */
+function attachCampaignChainStage(err, stage, adsetIndex) {
+  if (!err || typeof err !== "object") return;
+  err.campaignChainStage = stage;
+  err.stage = stage;
+  if (adsetIndex !== undefined && adsetIndex !== null) err.campaignChainAdsetIndex = adsetIndex;
+}
+
+/**
  * Create campaign → ad set → creative → ad (all PAUSED by default).
  * dailyBudget: dollars in request; sent to Meta as minor units (×100 for USD-style accounts).
  * When `body.adsets` has 2–4 items, creates one campaign + one shared creative + one ad set + ad per spec (audience testing).
@@ -844,6 +857,9 @@ async function createCampaignChainSingle(body, spec) {
   const useCbo = isCampaignBudgetOptimization();
 
   const partial = { campaign: null, adset: null, creative: null, ad: null };
+  let chainStage = "create_campaign";
+  /** @type {number | undefined} */
+  let chainAdsetIndex;
 
   try {
     const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(merged.dailyBudget || 20));
@@ -861,10 +877,12 @@ async function createCampaignChainSingle(body, spec) {
     }
 
     partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, campaignPayload);
+    chainStage = "ensure_campaign_budget";
     if (useCbo) {
       await ensureCampaignDailyBudgetApplied(partial.campaign.id, dailyBudgetMinor);
     }
 
+    chainStage = "create_adset";
     let targeting =
       merged.targeting && typeof merged.targeting === "object" && Object.keys(merged.targeting).length > 0
         ? merged.targeting
@@ -903,6 +921,7 @@ async function createCampaignChainSingle(body, spec) {
 
     partial.adset = await graphPostForm(`/${c.adAccountId}/adsets`, adsetPayload);
 
+    chainStage = "create_creative";
     partial.creative = await createLinkAdCreative({
       name: merged.creativeName || "Travel Creative",
       imageHash: merged.imageHash,
@@ -914,6 +933,7 @@ async function createCampaignChainSingle(body, spec) {
       description: merged.description,
     });
 
+    chainStage = "create_ad";
     partial.ad = await graphPostForm(`/${c.adAccountId}/ads`, {
       name: merged.adName || "Travel Ad",
       adset_id: partial.adset.id,
@@ -928,6 +948,7 @@ async function createCampaignChainSingle(body, spec) {
       ad: partial.ad,
     };
   } catch (err) {
+    attachCampaignChainStage(err, chainStage, chainAdsetIndex);
     await rollbackPartialCampaignChain(partial);
     throw err;
   }
@@ -946,6 +967,9 @@ async function createCampaignChainMulti(body, specs) {
   const campaignDailyBudgetMinor = majorCurrencyToMinorUnits(perAdsetMajor * specs.length);
 
   const partial = { campaign: null, creative: null, pairs: [] };
+  let chainStage = "create_campaign";
+  /** @type {number | undefined} */
+  let chainAdsetIndex;
 
   try {
     const campaignPayload = {
@@ -962,10 +986,12 @@ async function createCampaignChainMulti(body, specs) {
     }
 
     partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, campaignPayload);
+    chainStage = "ensure_campaign_budget";
     if (useCbo) {
       await ensureCampaignDailyBudgetApplied(partial.campaign.id, campaignDailyBudgetMinor);
     }
 
+    chainStage = "create_creative";
     partial.creative = await createLinkAdCreative({
       name: body.creativeName || "Travel Creative",
       imageHash: body.imageHash,
@@ -979,6 +1005,8 @@ async function createCampaignChainMulti(body, specs) {
 
     for (let i = 0; i < specs.length; i++) {
       const spec = specs[i];
+      chainStage = "create_adset";
+      chainAdsetIndex = i;
       let targeting =
         spec.targeting && typeof spec.targeting === "object" && Object.keys(spec.targeting).length > 0
           ? spec.targeting
@@ -1013,6 +1041,7 @@ async function createCampaignChainMulti(body, specs) {
       }
 
       const adset = await graphPostForm(`/${c.adAccountId}/adsets`, adsetPayload);
+      chainStage = "create_ad";
       const adName =
         specs.length > 1 ? `${body.adName || "Travel Ad"} ${i + 1}` : body.adName || "Travel Ad";
       const ad = await graphPostForm(`/${c.adAccountId}/ads`, {
@@ -1034,6 +1063,7 @@ async function createCampaignChainMulti(body, specs) {
       ad: first.ad,
     };
   } catch (err) {
+    attachCampaignChainStage(err, chainStage, chainAdsetIndex);
     await rollbackPartialMultiChain(partial);
     throw err;
   }
