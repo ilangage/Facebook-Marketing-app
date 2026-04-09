@@ -131,6 +131,31 @@ function validateUrlMaybe(url) {
   }
 }
 
+/**
+ * Preview carousel cards often only have `imageUrl` (see shared/carousel-template.js).
+ * Meta creatives require `imageHash` per card — upload each remote image to the ad account.
+ */
+async function hydrateLiveCarouselCards(cards) {
+  const list = Array.isArray(cards) ? cards.filter(Boolean) : [];
+  if (list.length < 2) return list;
+  return Promise.all(
+    list.map(async (card, idx) => {
+      if (card.imageHash && String(card.imageHash).trim()) return card;
+      const imageUrl = card.imageUrl || card.url;
+      if (!imageUrl) {
+        throw new Error(`carouselCards[${idx}] requires imageHash or imageUrl`);
+      }
+      if (!String(imageUrl).startsWith("http")) {
+        throw new Error(`carouselCards[${idx}] imageUrl must be a valid http(s) URL`);
+      }
+      const raw = await uploadAdImageFromUrl(imageUrl, `carousel-${idx + 1}`);
+      const imageHash = extractImageHashFromAdImagesResponse(raw);
+      if (!imageHash) throw new Error(`Could not read image hash for carousel card ${idx + 1}`);
+      return { ...card, imageHash };
+    })
+  );
+}
+
 /** Extract base64 payload from `data:image/...;base64,...` for Meta `bytes` upload. */
 function parseDataUrlToBase64(dataUrl) {
   const s = String(dataUrl || "");
@@ -712,11 +737,20 @@ function createServer() {
             sendJson(req, res, 400, { ok: false, error: "link must be a valid http(s) URL" });
             return;
           }
+          let cardsResolved = carouselCards;
+          if (carouselCards.length >= 2) {
+            try {
+              cardsResolved = await hydrateLiveCarouselCards(carouselCards);
+            } catch (e) {
+              sendJson(req, res, 400, { ok: false, error: e.message || String(e) });
+              return;
+            }
+          }
           const raw = await createLinkAdCreative({
             name: body.name,
             imageHash: body.imageHash,
             videoId: body.videoId,
-            carouselCards,
+            carouselCards: cardsResolved,
             link: body.link,
             message: body.message,
             headline: body.headline,
@@ -766,7 +800,16 @@ function createServer() {
             sendJson(req, res, 400, { ok: false, error: "dailyBudget must be > 0" });
             return;
           }
-          const result = await createCampaignChain(body);
+          let chainBody = body;
+          if (carouselCards.length >= 2) {
+            try {
+              chainBody = { ...body, carouselCards: await hydrateLiveCarouselCards(carouselCards) };
+            } catch (e) {
+              sendJson(req, res, 400, { ok: false, error: e.message || String(e) });
+              return;
+            }
+          }
+          const result = await createCampaignChain(chainBody);
           const spend = Number(body.dailyBudget || 200);
           const leads = Number(body.expectedLeads || 30);
           const cpa = leads > 0 ? spend / leads : spend;
