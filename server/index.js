@@ -354,6 +354,12 @@ function createServer() {
     }
 
     try {
+      const pathname = req.url.split("?")[0] || "";
+      if (req.method === "GET" && (pathname === "/" || pathname === "")) {
+        sendJson(req, res, 200, { ok: true, service: "facebook-marketing-api" });
+        return;
+      }
+
       const isWrite = req.method === "POST";
       if (isWrite) {
         const rl = rateLimitCheck(clientKeyFromReq(req), RATE_LIMIT_MAX, 60_000);
@@ -1208,6 +1214,20 @@ function createServer() {
 
 const server = createServer();
 
+/** Render requires listening on all interfaces; local dev uses Node default when unset. */
+function listenHostForPlatform() {
+  if (process.env.BIND_HOST) return process.env.BIND_HOST;
+  return process.env.RENDER === "true" ? "0.0.0.0" : undefined;
+}
+
+process.on("unhandledRejection", (reason, p) => {
+  console.error("[fatal] unhandledRejection", p, reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[fatal] uncaughtException", err);
+  process.exit(1);
+});
+
 async function boot() {
   const prodNeedsKey =
     process.env.NODE_ENV === "production" &&
@@ -1232,6 +1252,7 @@ async function boot() {
     console.warn("Dev mode: API_KEY unset — POST routes are open.");
   }
 
+  const listenHost = listenHostForPlatform();
   let listenPort = PORT;
   const maxDevPortTries = 10;
   for (let attempt = 0; attempt < maxDevPortTries; attempt++) {
@@ -1242,10 +1263,15 @@ async function boot() {
           reject(err);
         };
         server.once("error", onErr);
-        server.listen(listenPort, () => {
+        const onListening = () => {
           server.off("error", onErr);
           resolve();
-        });
+        };
+        if (listenHost) {
+          server.listen(listenPort, listenHost, onListening);
+        } else {
+          server.listen(listenPort, onListening);
+        }
       });
       break;
     } catch (err) {
@@ -1272,13 +1298,27 @@ async function boot() {
     }
   }
 
-  console.log(`Bot backend running on http://localhost:${listenPort}`);
+  const hostLabel = listenHost || "default";
+  console.log(
+    `Bot backend running on port ${listenPort} (host ${hostLabel}) — ${listenHost ? "0.0.0.0 = all interfaces (Render)" : "Node default bind"}`
+  );
   console.log(`Meta mode: ${useMockMeta() ? "MOCK (set META_ACCESS_TOKEN + META_AD_ACCOUNT_ID for live)" : "LIVE"}`);
   console.log(`Engine DB: ${process.env.ENGINE_DB_PATH || "data/bot-engine.db"}`);
   if (listenPort !== PORT) {
     console.warn(`Listening on ${listenPort} (requested ${PORT}). Match VITE_API_BASE in .env to http://localhost:${listenPort}`);
   }
   startScheduler();
+
+  const shutdown = (signal) => {
+    console.log(`[shutdown] ${signal} — closing HTTP server`);
+    server.close(() => {
+      console.log("[shutdown] http server closed");
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 10_000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 boot();
