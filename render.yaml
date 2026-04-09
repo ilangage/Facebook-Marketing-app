@@ -2,6 +2,10 @@
 # • Dashboard → Web Service: Build `npm ci --omit=dev` | Start `npm start` (if not using Blueprint).
 # • `omit=dev` = API-only install (no Vite/vitest) — faster, fewer OOM failures on small builders.
 # • Do NOT use `npm run dev:all` — Vite fails on Render.
+#
+# Clone failed: "Could not resolve host: github.com" — Render’s builder could not DNS-resolve GitHub (transient
+# outage or regional DNS). Not fixable in app code. Try: Manual Deploy again, wait and retry, check
+# https://www.githubstatus.com , or reconnect the GitHub repo under Service → Settings.
 
 services:
   - type: web
