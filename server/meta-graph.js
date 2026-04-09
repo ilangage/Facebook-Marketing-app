@@ -165,6 +165,22 @@ export function getDefaultCampaignDefaults() {
 }
 
 /**
+ * Advantage Campaign Budget (recommended): campaign `daily_budget` + `bid_strategy`; ad sets omit `daily_budget`.
+ * `META_CBO=true` (default) for both single- and multi–ad-set chains. `META_CBO=false` → legacy ABO per ad set.
+ * Does not change objective / optimization goal — only budget placement.
+ */
+export function isCampaignBudgetOptimization() {
+  const raw = (process.env.META_CBO ?? "true").trim().toLowerCase();
+  if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
+  return true;
+}
+
+/** @deprecated Use `isCampaignBudgetOptimization` (same behavior). */
+export function isCampaignBudgetOptimizationMulti() {
+  return isCampaignBudgetOptimization();
+}
+
+/**
  * Convert major currency units (e.g. dollars) to Meta minor units for daily_budget.
  * META_CURRENCY_MINOR_EXPONENT: 2 for USD/EUR, 0 for JPY (whole currency).
  */
@@ -177,6 +193,40 @@ export function majorCurrencyToMinorUnits(majorAmount) {
   return Math.max(factor, Math.round(m * factor));
 }
 
+/**
+ * Meta often returns generic `message: "Invalid parameter"` (code 100) — merge user-facing and debug fields.
+ * @param {Record<string, unknown> | null | undefined} graphErr
+ */
+export function formatGraphApiErrorMessage(graphErr) {
+  if (!graphErr || typeof graphErr !== "object") {
+    return String(graphErr ?? "Graph error");
+  }
+  const primary = String(graphErr.message || "Graph error").trim();
+  const parts = [primary];
+  const userMsg = graphErr.error_user_msg;
+  if (userMsg && String(userMsg).trim() && String(userMsg).trim() !== primary) {
+    parts.push(String(userMsg).trim());
+  }
+  if (graphErr.error_user_title) {
+    parts.push(`(${String(graphErr.error_user_title).trim()})`);
+  }
+  const codeBits = [];
+  if (graphErr.code != null) codeBits.push(String(graphErr.code));
+  if (graphErr.error_subcode != null) codeBits.push(`subcode ${graphErr.error_subcode}`);
+  if (codeBits.length) parts.push(`[${codeBits.join(", ")}]`);
+
+  const blame = graphErr.error_data ?? graphErr.blame_field_specs;
+  if (blame != null) {
+    try {
+      const s = typeof blame === "string" ? blame : JSON.stringify(blame);
+      if (s && s !== "{}" && s !== "[]") parts.push(s.length > 800 ? `${s.slice(0, 800)}…` : s);
+    } catch {
+      /* ignore */
+    }
+  }
+  return parts.join(" ");
+}
+
 function toFormBody(token, params) {
   const body = new URLSearchParams();
   body.set("access_token", token);
@@ -186,11 +236,50 @@ function toFormBody(token, params) {
     if (value === undefined || value === null) continue;
     if (typeof value === "object") {
       body.set(key, JSON.stringify(value));
+    } else if (typeof value === "boolean") {
+      /** Graph form-encoded booleans must be literal "true" / "false". */
+      body.set(key, value ? "true" : "false");
     } else {
       body.set(key, String(value));
     }
   }
   return body;
+}
+
+/** META_ADSET_BUDGET_SHARING=true → sharing on; default false (explicit for Graph). */
+function adsetBudgetSharingEnabledFromEnv() {
+  const v = String(process.env.META_ADSET_BUDGET_SHARING ?? "false")
+    .trim()
+    .toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
+}
+
+/** Campaign bid strategy for CBO; empty / omit / none = do not send (some accounts error when combined with objective). */
+function campaignBidStrategyFromEnv() {
+  const s = (process.env.META_CAMPAIGN_BID_STRATEGY || "LOWEST_COST_WITHOUT_CAP").trim();
+  if (!s || /^omit$/i.test(s) || /^none$/i.test(s)) return "";
+  return s;
+}
+
+/**
+ * Meta sometimes returns campaign id without persisting `daily_budget` on create; ad set then fails with
+ * is_adset_budget_sharing_enabled (Graph treats spend as non–campaign-budget). Re-apply budget on the campaign.
+ */
+async function ensureCampaignDailyBudgetApplied(campaignId, dailyBudgetMinor) {
+  if (!campaignId || !(dailyBudgetMinor > 0)) return;
+  const camp = await graphGet(`/${campaignId}`, { fields: "daily_budget" });
+  if (Number(camp.daily_budget || 0) > 0) return;
+  const patch = { daily_budget: dailyBudgetMinor, buying_type: "AUCTION" };
+  const cbs = campaignBidStrategyFromEnv();
+  if (cbs) patch.bid_strategy = cbs;
+  await graphPostForm(`/${campaignId}`, patch);
+  const again = await graphGet(`/${campaignId}`, { fields: "daily_budget" });
+  if (!(Number(again.daily_budget || 0) > 0)) {
+    throw new Error(
+      "Campaign has no daily_budget after create — Meta did not enable Advantage Campaign Budget. " +
+        "Try META_CAMPAIGN_BID_STRATEGY=omit, or set META_CBO=false and META_ADSET_BUDGET_SHARING=true for ad-set budgets."
+    );
+  }
 }
 
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
@@ -200,8 +289,12 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
     const res = await fetch(url, { ...options, signal: controller.signal });
     const data = await res.json();
     if (!res.ok) {
-      const err = new Error(data?.error?.message || `Graph request failed (${res.status})`);
-      err.meta = data?.error || { status: res.status };
+      const ge = data?.error && typeof data.error === "object" ? data.error : null;
+      const msg = ge
+        ? formatGraphApiErrorMessage(ge)
+        : data?.error?.message || `Graph request failed (${res.status})`;
+      const err = new Error(msg);
+      err.meta = ge || data?.error || { status: res.status };
       throw err;
     }
     return data;
@@ -219,8 +312,9 @@ export async function graphPostForm(path, params) {
   const body = toFormBody(c.token, params);
   const data = await fetchJsonWithTimeout(url, { method: "POST", body });
   if (data.error) {
-    const err = new Error(data.error.message || JSON.stringify(data.error));
-    err.meta = data.error;
+    const ge = typeof data.error === "object" ? data.error : { message: String(data.error) };
+    const err = new Error(formatGraphApiErrorMessage(ge));
+    err.meta = ge;
     throw err;
   }
   return data;
@@ -729,6 +823,8 @@ export async function createLinkAdCreative(payload) {
  * Create campaign → ad set → creative → ad (all PAUSED by default).
  * dailyBudget: dollars in request; sent to Meta as minor units (×100 for USD-style accounts).
  * When `body.adsets` has 2–4 items, creates one campaign + one shared creative + one ad set + ad per spec (audience testing).
+ * `META_CBO` (default on): Advantage Campaign Budget — campaign `daily_budget` (+ `bid_strategy`); ad sets omit `daily_budget`.
+ * Multi: total campaign budget = `dailyBudget` × ad set count. Single: campaign budget = request `dailyBudget`. Goal/objective unchanged.
  */
 export async function createCampaignChain(body) {
   const specs = normalizeAdsetSpecs(body);
@@ -745,18 +841,30 @@ async function createCampaignChainSingle(body, spec) {
   const objective = merged.objective || defs.objective;
   const optimizationGoal = merged.optimizationGoal || defs.optimizationGoal;
   const customEventType = merged.customEventType || defs.customEventType;
+  const useCbo = isCampaignBudgetOptimization();
 
   const partial = { campaign: null, adset: null, creative: null, ad: null };
 
   try {
-    partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, {
+    const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(merged.dailyBudget || 20));
+    const campaignPayload = {
       name: merged.campaignName || "Travel Campaign",
       objective,
       status: merged.status || "PAUSED",
       special_ad_categories: [],
-    });
+    };
+    if (useCbo) {
+      campaignPayload.buying_type = "AUCTION";
+      campaignPayload.daily_budget = dailyBudgetMinor;
+      const cbs = campaignBidStrategyFromEnv();
+      if (cbs) campaignPayload.bid_strategy = cbs;
+    }
 
-    const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(merged.dailyBudget || 20));
+    partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, campaignPayload);
+    if (useCbo) {
+      await ensureCampaignDailyBudgetApplied(partial.campaign.id, dailyBudgetMinor);
+    }
+
     let targeting =
       merged.targeting && typeof merged.targeting === "object" && Object.keys(merged.targeting).length > 0
         ? merged.targeting
@@ -767,14 +875,19 @@ async function createCampaignChainSingle(body, spec) {
     const adsetPayload = {
       name: merged.adsetName || "Travel Ad Set",
       campaign_id: partial.campaign.id,
-      daily_budget: dailyBudgetMinor,
       billing_event: "IMPRESSIONS",
       optimization_goal: optimizationGoal,
-      bid_strategy: "LOWEST_COST_WITHOUT_CAP",
       targeting,
       status: "PAUSED",
       start_time: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     };
+    if (useCbo) {
+      /** CBO: budget + bid live on the campaign; ad set `bid_strategy` can make Graph ignore campaign budget. */
+    } else {
+      adsetPayload.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+      adsetPayload.daily_budget = dailyBudgetMinor;
+      adsetPayload.is_adset_budget_sharing_enabled = adsetBudgetSharingEnabledFromEnv();
+    }
 
     if (optimizationGoal === "OFFSITE_CONVERSIONS") {
       if (!c.pixelId) {
@@ -826,17 +939,32 @@ async function createCampaignChainMulti(body, specs) {
   const objective = body.objective || defs.objective;
   const optimizationGoal = body.optimizationGoal || defs.optimizationGoal;
   const customEventType = body.customEventType || defs.customEventType;
-  const dailyBudgetMinor = majorCurrencyToMinorUnits(Number(body.dailyBudget || 20));
+  const perAdsetMajor = Number(body.dailyBudget || 20);
+  const dailyBudgetMinor = majorCurrencyToMinorUnits(perAdsetMajor);
+  const useCbo = isCampaignBudgetOptimization();
+  /** CBO: total campaign daily = per-ad-set amount × N (same total $ as legacy N × per-ad-set). */
+  const campaignDailyBudgetMinor = majorCurrencyToMinorUnits(perAdsetMajor * specs.length);
 
   const partial = { campaign: null, creative: null, pairs: [] };
 
   try {
-    partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, {
+    const campaignPayload = {
       name: body.campaignName || "Travel Campaign",
       objective,
       status: body.status || "PAUSED",
       special_ad_categories: [],
-    });
+    };
+    if (useCbo) {
+      campaignPayload.buying_type = "AUCTION";
+      campaignPayload.daily_budget = campaignDailyBudgetMinor;
+      const cbs = campaignBidStrategyFromEnv();
+      if (cbs) campaignPayload.bid_strategy = cbs;
+    }
+
+    partial.campaign = await graphPostForm(`/${c.adAccountId}/campaigns`, campaignPayload);
+    if (useCbo) {
+      await ensureCampaignDailyBudgetApplied(partial.campaign.id, campaignDailyBudgetMinor);
+    }
 
     partial.creative = await createLinkAdCreative({
       name: body.creativeName || "Travel Creative",
@@ -860,14 +988,17 @@ async function createCampaignChainMulti(body, specs) {
       const adsetPayload = {
         name: spec.name,
         campaign_id: partial.campaign.id,
-        daily_budget: dailyBudgetMinor,
         billing_event: "IMPRESSIONS",
         optimization_goal: optimizationGoal,
-        bid_strategy: "LOWEST_COST_WITHOUT_CAP",
         targeting,
         status: "PAUSED",
         start_time: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       };
+      if (!useCbo) {
+        adsetPayload.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+        adsetPayload.daily_budget = dailyBudgetMinor;
+        adsetPayload.is_adset_budget_sharing_enabled = adsetBudgetSharingEnabledFromEnv();
+      }
 
       if (optimizationGoal === "OFFSITE_CONVERSIONS") {
         if (!c.pixelId) {
@@ -931,6 +1062,11 @@ export async function getAdsetById(adsetId) {
   return graphGet(`/${adsetId}`, { fields: "id,name,daily_budget,status,campaign_id,targeting" });
 }
 
+export async function getCampaignById(campaignId) {
+  if (!campaignId) throw new Error("campaignId is required");
+  return graphGet(`/${campaignId}`, { fields: "id,name,daily_budget,status" });
+}
+
 /** List ads under an ad set (for operator tools / creative swap). */
 export async function getAdsForAdset(adsetId) {
   if (!adsetId) throw new Error("adsetId is required");
@@ -958,7 +1094,18 @@ export async function updateAdCreativeOnAd(adId, creativeId) {
 export async function updateAdsetDailyBudget(adsetId, dailyBudgetMinor) {
   if (!adsetId) throw new Error("adsetId is required");
   const next = Math.max(100, Math.round(Number(dailyBudgetMinor || 0)));
-  return graphPostForm(`/${adsetId}`, { daily_budget: next });
+  /** Required when budget lives at ad set (no campaign daily_budget / ABO-style updates). */
+  return graphPostForm(`/${adsetId}`, {
+    daily_budget: next,
+    is_adset_budget_sharing_enabled: adsetBudgetSharingEnabledFromEnv(),
+  });
+}
+
+/** Advantage Campaign Budget: scale spend at the campaign object (ad sets have no daily_budget). */
+export async function updateCampaignDailyBudget(campaignId, dailyBudgetMinor) {
+  if (!campaignId) throw new Error("campaignId is required");
+  const next = Math.max(100, Math.round(Number(dailyBudgetMinor || 0)));
+  return graphPostForm(`/${campaignId}`, { daily_budget: next });
 }
 
 export function extractImageHashFromAdImagesResponse(data) {

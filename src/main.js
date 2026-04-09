@@ -1,4 +1,55 @@
 import "./style.css";
+import { creativeSpecsPanelHtml } from "./creative-meta-specs.js";
+import { CAROUSEL_CARDS_TEMPLATE } from "../shared/carousel-template.js";
+
+const PREVIEW_CAROUSEL_STORAGE_KEY = "preview.carouselCards.v1";
+
+function readStoredCarouselCards() {
+  if (typeof sessionStorage === "undefined") return null;
+  try {
+    const s = sessionStorage.getItem(PREVIEW_CAROUSEL_STORAGE_KEY);
+    if (!s) return null;
+    const p = JSON.parse(s);
+    return Array.isArray(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistCarouselCardsEditor(cards) {
+  if (typeof sessionStorage === "undefined") return;
+  try {
+    if (!Array.isArray(cards) || cards.length === 0) {
+      sessionStorage.removeItem(PREVIEW_CAROUSEL_STORAGE_KEY);
+      return;
+    }
+    sessionStorage.setItem(PREVIEW_CAROUSEL_STORAGE_KEY, JSON.stringify(cards));
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+/** Prefer API (2+ cards), then last saved editor session, then in-memory, then default template. */
+function mergeAdPreviewCarouselCards(apiPreview, previousDashboard) {
+  const fromApi = apiPreview?.carouselCards;
+  const fromPrev = previousDashboard?.adPreview?.carouselCards;
+  const fromStore = readStoredCarouselCards();
+  const clone = (a) => JSON.parse(JSON.stringify(a));
+
+  if (Array.isArray(fromApi) && fromApi.length >= 2) return clone(fromApi);
+  if (Array.isArray(fromStore) && fromStore.length >= 2) return clone(fromStore);
+  if (Array.isArray(fromPrev) && fromPrev.length >= 2) return clone(fromPrev);
+  if (Array.isArray(fromApi) && fromApi.length > 0) return clone(fromApi);
+  if (Array.isArray(fromStore) && fromStore.length > 0) return clone(fromStore);
+  if (Array.isArray(fromPrev) && fromPrev.length > 0) return clone(fromPrev);
+  return clone(CAROUSEL_CARDS_TEMPLATE);
+}
+
+function carouselCardsShownInEditor() {
+  const c = dashboard.adPreview?.carouselCards;
+  if (Array.isArray(c) && c.length > 0) return c;
+  return CAROUSEL_CARDS_TEMPLATE;
+}
 
 /** If the SPA shell loads for a legal URL (e.g. dev server serves `/` for `/privacy`), load the static HTML under public (privacy, terms, data-deletion). */
 (function redirectLegalStaticHtml() {
@@ -65,11 +116,37 @@ const appState = {
   ],
   /** When splits &gt; 1, main Insert button merges picks into this slot (0-based). */
   targetingInsertSlotIndex: 0,
+  /** Carousel ad preview: which strip card syncs the hero (0-based). */
+  carouselPreviewIndex: 0,
 };
 
 /** Only the latest targeting-search request may update UI (tab / Search spam). */
 let targetingSearchGen = 0;
 let targetingSearchAbort = null;
+
+/** Attach carousel strip → hero sync once (delegation on #app). */
+let carouselStripDelegated = false;
+
+function onCarouselStripClick(e) {
+  const item = e.target.closest(".ad-preview-carousel .ad-preview-card-item[data-card-index]");
+  if (!item) return;
+  const idx = Number(item.dataset.cardIndex);
+  if (Number.isNaN(idx)) return;
+  e.preventDefault();
+  appState.carouselPreviewIndex = idx;
+  render();
+}
+
+function onCarouselStripKeydown(e) {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const item = e.target.closest(".ad-preview-carousel .ad-preview-card-item[data-card-index]");
+  if (!item) return;
+  e.preventDefault();
+  const idx = Number(item.dataset.cardIndex);
+  if (Number.isNaN(idx)) return;
+  appState.carouselPreviewIndex = idx;
+  render();
+}
 
 const TARGETING_SEARCH_TABS = [
   { type: "adinterest", label: "Interests" },
@@ -698,9 +775,19 @@ function revokePreviewImageBlob() {
 
 function applyLocalPreviewImageBlob() {
   if (previewImageBlobUrl && dashboard.adPreview) {
+    const prev = dashboard.adPreview;
+    const cc = Array.isArray(prev.carouselCards) ? prev.carouselCards : [];
     dashboard.adPreview = {
-      ...dashboard.adPreview,
+      ...prev,
       mediaUrl: previewImageBlobUrl,
+      carouselCards:
+        cc.length > 0
+          ? cc.map((card) => ({
+              ...card,
+              imageUrl: previewImageBlobUrl,
+              url: previewImageBlobUrl,
+            }))
+          : prev.carouselCards,
     };
   }
 }
@@ -792,7 +879,7 @@ function isVideoUrlForPreview(url) {
   return /\.(mp4|mov|webm)(\?|$)/i.test(String(url || ""));
 }
 
-function adPreviewMarkup(preview) {
+function adPreviewMarkup(preview, carouselSelectedIndex = 0) {
   const p = preview || {};
   const status = p.deliveryStatus === "ACTIVE" ? "ACTIVE" : "PAUSED";
   const cards = Array.isArray(p.carouselCards) ? p.carouselCards.filter(Boolean) : [];
@@ -800,34 +887,86 @@ function adPreviewMarkup(preview) {
   const hasVideo = p.mediaType === "video" && p.mediaUrl;
   const hasImage = Boolean(p.mediaUrl) && !hasVideo && !hasCarousel;
 
+  const stripIdx =
+    hasCarousel && cards.length
+      ? Math.min(Math.max(0, carouselSelectedIndex), cards.length - 1)
+      : 0;
+
   const carouselStripHtml = cards
-    .map(
-      (card) => `<article class="ad-preview-card-item">
-        <img class="ad-preview-card-media" src="${escapeAttr(card.imageUrl || "https://picsum.photos/seed/card/1200/630")}" alt="" />
-        <div class="ad-preview-card-body">
-          <p class="ad-preview-card-title">${escapeHtml(card.headline || "Travel package")}</p>
-          <p class="ad-preview-card-text">${escapeHtml(card.description || "")}</p>
+    .map((card, i) => {
+      const title = String(card.headline || "Travel package").trim();
+      const priceLine = String(card.priceLabel || card.price || "").trim();
+      let badgeText = "";
+      if (card.badge === "") badgeText = "";
+      else if (card.badge != null && String(card.badge).trim() !== "") badgeText = String(card.badge).trim();
+      else badgeText = title;
+      const tourType = String(card.tourType || card.category || "").trim();
+      const travelersLine = String(card.travelersLine || card.travelers || "").trim();
+      const priceHtml = priceLine
+        ? `<p class="ad-preview-card-price">${escapeHtml(priceLine)}</p>`
+        : "";
+      const tourHtml = tourType
+        ? `<p class="ad-preview-card-tour-type">${escapeHtml(tourType)}</p>`
+        : "";
+      const travelersHtml = travelersLine
+        ? `<p class="ad-preview-card-travelers">${escapeHtml(travelersLine)}</p>`
+        : "";
+      const badgeHtml = badgeText
+        ? `<span class="ad-preview-card-badge" title="${escapeAttr(badgeText)}">${escapeHtml(badgeText)}</span>`
+        : "";
+      const active = i === stripIdx ? " ad-preview-card-item--active" : "";
+      return `<article class="ad-preview-card-item${active}" data-card-index="${i}" role="button" tabindex="0" aria-pressed="${i === stripIdx}">
+        <div class="ad-preview-card-media-wrap">
+          ${badgeHtml}
+          <img class="ad-preview-card-media" src="${escapeAttr(card.imageUrl || "https://picsum.photos/seed/card/1200/628")}" alt="" />
         </div>
-      </article>`
-    )
+        <div class="ad-preview-card-body">
+          <p class="ad-preview-card-title" title="${escapeAttr(title)}">${escapeHtml(title)}</p>
+          ${priceHtml}
+          ${tourHtml}
+          ${travelersHtml}
+        </div>
+      </article>`;
+    })
     .join("");
 
   let media;
   if (hasCarousel) {
-    const heroRaw =
-      (p.mediaUrl && String(p.mediaUrl).trim()) ||
-      cards[0]?.imageUrl ||
-      cards[0]?.url ||
-      "https://picsum.photos/seed/carousel-hero/1200/630";
+    /** Main hero: only top-level preview fields + Hero image URL — not JSON cards / not strip selection. */
+    let heroRaw = String(p.mediaUrl || "").trim();
+    if (!heroRaw) heroRaw = "https://picsum.photos/seed/carousel-hero/1200/628";
     const heroUrl = String(heroRaw);
     const heroIsVideo = isVideoUrlForPreview(heroUrl);
+    /** Design-time pixels for feed hero (1.91:1); CSS scales — helps video/img intrinsic ratio + CLS. */
+    const HERO_W = 1200;
+    const HERO_H = 628;
     const heroBlock = heroIsVideo
-      ? `<video class="ad-preview-media ad-preview-carousel-hero-media" src="${escapeAttr(heroUrl)}" controls muted playsinline loop></video>`
-      : `<img class="ad-preview-media ad-preview-carousel-hero-media" src="${escapeAttr(heroUrl)}" alt="" />`;
-    media = `<div class="ad-preview-carousel-stack">
-      <div class="ad-preview-carousel-hero">${heroBlock}</div>
-      <p class="ad-preview-carousel-strip-title">More packages — swipe</p>
-      <div class="ad-preview-carousel">${carouselStripHtml}</div>
+      ? `<video class="ad-preview-media ad-preview-carousel-hero-media" src="${escapeAttr(heroUrl)}" width="${HERO_W}" height="${HERO_H}" controls muted playsinline loop preload="metadata"></video><div class="ad-preview-hero-play" aria-hidden="true"><span class="ad-preview-hero-play-icon"></span></div>`
+      : `<img class="ad-preview-media ad-preview-carousel-hero-media" src="${escapeAttr(heroUrl)}" alt="" width="${HERO_W}" height="${HERO_H}" />`;
+    const capTitle = String(p.headline || "").trim();
+    const capDesc = String(p.description || "").trim();
+    const heroCaptionBar =
+      capTitle || capDesc
+        ? `<div class="ad-preview-carousel-hero-caption ad-preview-carousel-hero-caption--below">
+            <div class="ad-preview-hero-caption-stack">
+              ${capTitle ? `<span class="ad-preview-carousel-hero-caption-title">${escapeHtml(capTitle)}</span>` : ""}
+              ${capDesc ? `<span class="ad-preview-carousel-hero-caption-desc">${escapeHtml(capDesc)}</span>` : ""}
+            </div>
+          </div>`
+        : "";
+    const heroRating = `<div class="ad-preview-hero-rating-row" aria-hidden="true"><span class="ad-preview-hero-rating-star">★</span><span class="ad-preview-hero-rating-num">4.9</span><span class="ad-preview-hero-rating-star">★</span><span class="ad-preview-hero-rating-label">Rated</span></div>`;
+    media = `<div class="ad-preview-carousel-stack ad-preview-carousel-stack--premium">
+      <div class="ad-preview-carousel-hero">
+        <div class="ad-preview-carousel-hero-shell ad-preview-carousel-hero-shell--premium">
+          <div class="ad-preview-carousel-hero-media-wrap">
+            ${heroBlock}
+            ${heroRating}
+          </div>
+          ${heroCaptionBar}
+        </div>
+      </div>
+      <p class="ad-preview-carousel-strip-title ad-preview-carousel-strip-title--premium">Popular tours <span class="ad-preview-strip-sep">—</span> swipe <span class="ad-preview-strip-chev" aria-hidden="true">››</span></p>
+      <div class="ad-preview-carousel ad-preview-carousel--premium">${carouselStripHtml}</div>
     </div>`;
   } else if (hasVideo) {
     media = `<video class="ad-preview-media" src="${escapeAttr(p.mediaUrl)}" controls muted playsinline loop></video>`;
@@ -843,13 +982,33 @@ function adPreviewMarkup(preview) {
       ? `<p class="ad-preview-metaids">${escapeHtml([ids.adId && `Ad ${ids.adId}`, ids.campaignId && `Campaign ${ids.campaignId}`].filter(Boolean).join(" · "))}</p>`
       : "";
 
+  const linkHostname =
+    String(p.displayLink || "").trim() ||
+    (() => {
+      try {
+        return new URL(String(p.linkUrl || "https://example.com")).hostname.replace(/^www\./, "");
+      } catch {
+        return "";
+      }
+    })();
+
+  const linkBoxInner = hasCarousel
+    ? `<div class="ad-preview-linkcol ad-preview-linkcol--compact">
+            <span class="ad-preview-domain">${escapeHtml(linkHostname)}</span>
+          </div>`
+    : `<div class="ad-preview-linkcol">
+            <div class="ad-preview-linkheadline">${escapeHtml(p.headline || "")}</div>
+            <div class="ad-preview-linkdesc">${escapeHtml(p.description || "")}</div>
+            <div class="ad-preview-domain">${escapeHtml(p.displayLink || "")}</div>
+          </div>`;
+
   return `
-    <div class="ad-preview-device">
+    <div class="ad-preview-device${hasCarousel ? " ad-preview-device--premium" : ""}">
       <div class="ad-preview-chrome">
         <span class="ad-preview-dot"></span><span class="ad-preview-dot"></span><span class="ad-preview-dot"></span>
       </div>
-      <div class="ad-preview-surface">
-        <div class="ad-preview-card">
+      <div class="ad-preview-surface${hasCarousel ? " ad-preview-surface--premium" : ""}">
+        <div class="ad-preview-card${hasCarousel ? " ad-preview-card--carousel-mode ad-preview-card--premium" : ""}">
           <div class="ad-preview-header">
             <div class="ad-preview-avatar" aria-hidden="true">${escapeHtml((p.pageName || "P").slice(0, 1).toUpperCase())}</div>
             <div class="ad-preview-headmeta">
@@ -859,12 +1018,8 @@ function adPreviewMarkup(preview) {
           </div>
           <p class="ad-preview-primary">${escapeHtml(p.primaryText || "")}</p>
           ${media}
-          <a class="ad-preview-linkbox" href="${escapeAttr(p.linkUrl || "#")}" target="_blank" rel="noopener noreferrer">
-            <div class="ad-preview-linkcol">
-              <div class="ad-preview-linkheadline">${escapeHtml(p.headline || "")}</div>
-              <div class="ad-preview-linkdesc">${escapeHtml(p.description || "")}</div>
-              <div class="ad-preview-domain">${escapeHtml(p.displayLink || "")}</div>
-            </div>
+          <a class="ad-preview-linkbox${hasCarousel ? " ad-preview-linkbox--carousel ad-preview-linkbox--premium" : ""}" href="${escapeAttr(p.linkUrl || "#")}" target="_blank" rel="noopener noreferrer">
+            ${linkBoxInner}
             <span class="ad-preview-cta">${escapeHtml(p.cta || "Learn more")}</span>
           </a>
         </div>
@@ -1043,6 +1198,18 @@ function render() {
   if (appState.error) {
     app.innerHTML = `<div class="loading error">${escapeHtml(appState.error)}</div>`;
     return;
+  }
+
+  const ap = dashboard.adPreview;
+  const cc =
+    ap?.mediaType === "carousel" && Array.isArray(ap.carouselCards) ? ap.carouselCards.filter(Boolean) : [];
+  if (cc.length < 2) {
+    appState.carouselPreviewIndex = 0;
+  } else {
+    appState.carouselPreviewIndex = Math.min(
+      Math.max(0, appState.carouselPreviewIndex || 0),
+      cc.length - 1
+    );
   }
 
   app.innerHTML = `
@@ -1382,9 +1549,10 @@ function render() {
           </article>
           <article class="card ad-preview-hero">
             <h3>Ad preview (Meta feed style)</h3>
-            <p class="meta-pill">Edit copy below or upload an image in “Upload &amp; build” — preview updates. “Update preview” saves form-only changes. Pipeline runs also refresh this.</p>
+            <p class="meta-pill">Carousel mode: the <strong>large hero</strong> uses Headline, Description, and Hero image URL only. <strong>Carousel JSON</strong> fills the swipe strip below — it does not drive the hero.</p>
+            ${creativeSpecsPanelHtml()}
             <div class="ad-preview-layout">
-              ${adPreviewMarkup(dashboard.adPreview)}
+              ${adPreviewMarkup(dashboard.adPreview, appState.carouselPreviewIndex)}
               <div class="ad-preview-form">
                 <label>Page name <input type="text" id="previewPageName" value="${escapeAttr(dashboard.adPreview?.pageName || "")}" /></label>
                 <label>Primary text <textarea id="previewMessage" rows="3">${escapeHtml(dashboard.adPreview?.primaryText || "")}</textarea></label>
@@ -1392,9 +1560,10 @@ function render() {
                 <label>Description <input type="text" id="previewDescription" value="${escapeAttr(dashboard.adPreview?.description || "")}" /></label>
                 <label>Destination URL <input type="url" id="previewLink" value="${escapeAttr(dashboard.adPreview?.linkUrl || "")}" /></label>
                 <label>CTA label <input type="text" id="previewCta" value="${escapeAttr(dashboard.adPreview?.cta || "")}" placeholder="Learn more" /></label>
-                <label>Hero image or video URL <input type="url" id="previewMediaUrl" value="${escapeAttr(dashboard.adPreview?.mediaUrl || "")}" placeholder="https://… (carousel: large creative on top)" /></label>
-                <label>Carousel cards (JSON array)</label>
-                <textarea id="previewCarouselCards" rows="6" placeholder='[{"headline":"Bali","description":"5 nights","imageUrl":"https://...","link":"https://..."}]'>${escapeHtml(JSON.stringify(dashboard.adPreview?.carouselCards || [], null, 2))}</textarea>
+                <label>Hero image or video URL <span class="field-hint">Export/upload at <strong>1200×628 px</strong> (width × height, 1.91:1). Same frame for <strong>image and MP4/WebM</strong> — matches the carousel hero slot; other sizes are cropped to fit.</span>
+                  <input type="url" id="previewMediaUrl" value="${escapeAttr(dashboard.adPreview?.mediaUrl || "")}" placeholder="https://…" /></label>
+                <label>Carousel cards (JSON array) <span class="field-hint">Strip cards only — does <strong>not</strong> change the large hero (hero = <strong>Headline</strong>, <strong>Description</strong>, <strong>Hero image or video URL</strong> above). Template: <code>shared/carousel-template.js</code>. Needs <strong>2+ cards</strong>. Fields: <code>headline</code>, <code>priceLabel</code>, optional <code>badge</code>, <code>tourType</code>/<code>category</code>, <code>travelersLine</code>, <code>imageUrl</code>, <code>link</code>.</span></label>
+                <textarea id="previewCarouselCards" rows="10" placeholder='See shared/carousel-template.js'>${escapeHtml(JSON.stringify(carouselCardsShownInEditor(), null, 2))}</textarea>
                 <label class="ad-preview-row">
                   <span>Media type</span>
                   <select id="previewMediaType">
@@ -1430,7 +1599,7 @@ function render() {
           </article>
           <article class="card ad-build-card">
             <h3>Upload &amp; build</h3>
-            <p class="ad-build-lead">Hook + Problem + Offer + Proof + CTA — uploads here sync the <strong>preview above</strong> and Meta asset list.</p>
+            <p class="ad-build-lead">Hook + Problem + Offer + Proof + CTA — each image upload sets the <strong>carousel hero + three package cards</strong> (same image) in the preview above, and syncs the Meta asset list. Strip cards are manual (no auto-slide).</p>
             <p class="meta-pill">
               Mock: choose a file or sample URL. Live: file picker sends <code>data:image/…;base64,…</code> (server uploads via Graph
               <code>bytes</code>) or use a public <code>https://</code> URL.
@@ -1510,7 +1679,7 @@ function render() {
           <article class="card ad-preview-card-wrap">
             <h3>Ad preview</h3>
             <p class="meta-pill">Same card as Creatives — updates when you run the pipeline or use Preview fields.</p>
-            ${adPreviewMarkup(dashboard.adPreview)}
+            ${adPreviewMarkup(dashboard.adPreview, appState.carouselPreviewIndex)}
           </article>
           <article class="card">
             <h3>Publish policy</h3>
@@ -2026,7 +2195,7 @@ function bindEvents() {
     imageDemoUrlButton.addEventListener("click", () =>
       runAction("/api/meta/upload-image", {
         name: "creative-hero",
-        url: "https://picsum.photos/seed/travelads/1200/630",
+        url: "https://picsum.photos/seed/travelads/1200/628",
       })
     );
   }
@@ -2109,7 +2278,7 @@ function bindEvents() {
       const dailyBudget = parsePositiveBudget(raw, appState.budgets.pipelineImage);
       appState.budgets.pipelineImage = dailyBudget;
       runAction("/api/pipeline/run", {
-        imageUrl: "https://picsum.photos/seed/pipeline/1200/630",
+        imageUrl: "https://picsum.photos/seed/pipeline/1200/628",
         message: "Dream Bali honeymoon — limited suites left. Tap to see packages & pricing.",
         headline: "Bali Honeymoon — 40% off",
         description: "5★ resorts · airport transfers included",
@@ -2157,19 +2326,22 @@ function bindEvents() {
           {
             headline: "Bali Honeymoon",
             description: "4N/5D with spa and transfers",
-            imageUrl: "https://picsum.photos/seed/bali-carousel/1200/630",
+            priceLabel: "From $899",
+            imageUrl: "https://picsum.photos/seed/bali-carousel/1200/628",
             link: "https://example.com/bali-honeymoon",
           },
           {
             headline: "Dubai Family Trip",
             description: "Theme parks + city tour bundle",
-            imageUrl: "https://picsum.photos/seed/dubai-carousel/1200/630",
+            priceLabel: "From $1,490",
+            imageUrl: "https://picsum.photos/seed/dubai-carousel/1200/628",
             link: "https://example.com/dubai-family",
           },
           {
             headline: "Maldives Luxury",
             description: "Water villa + premium dining",
-            imageUrl: "https://picsum.photos/seed/maldives-carousel/1200/630",
+            priceLabel: "From $2,400",
+            imageUrl: "https://picsum.photos/seed/maldives-carousel/1200/628",
             link: "https://example.com/maldives-luxury",
           },
         ],
@@ -2213,6 +2385,8 @@ function bindEvents() {
         return;
       }
       try {
+        /** Server + UI need 2+ cards for carousel preview; always send parsed JSON (not only when Media type = Carousel). */
+        const hasMultiCarousel = carouselCards.length >= 2;
         const data = await apiFetch("/api/preview/render", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2223,13 +2397,26 @@ function bindEvents() {
             description,
             link,
             cta,
-            imageUrl: mediaType === "image" ? mediaUrl : undefined,
-            file_url: mediaType === "video" ? mediaUrl : undefined,
-            mode: mediaType === "carousel" ? "carousel" : mediaType === "video" ? "video" : undefined,
-            carouselCards: mediaType === "carousel" ? carouselCards : undefined,
+            imageUrl: mediaType === "video" && !hasMultiCarousel ? undefined : mediaUrl || undefined,
+            file_url: mediaType === "video" && !hasMultiCarousel ? mediaUrl : undefined,
+            mode: hasMultiCarousel
+              ? "carousel"
+              : mediaType === "carousel"
+                ? "carousel"
+                : mediaType === "video"
+                  ? "video"
+                  : undefined,
+            carouselCards: carouselCards.length ? carouselCards : undefined,
           }),
         });
-        dashboard.adPreview = data.adPreview || dashboard.adPreview;
+        const fromApi = data.adPreview || dashboard.adPreview;
+        /** Keep textarea JSON identical to what the user submitted (server used to return a narrowed object). */
+        dashboard.adPreview = {
+          ...fromApi,
+          carouselCards:
+            carouselCards.length > 0 ? JSON.parse(JSON.stringify(carouselCards)) : (fromApi?.carouselCards ?? []),
+        };
+        persistCarouselCardsEditor(dashboard.adPreview.carouselCards || []);
         applyLocalPreviewImageBlob();
         render();
       } catch (error) {
@@ -2252,6 +2439,12 @@ function bindEvents() {
       }
     });
   }
+
+  if (!carouselStripDelegated && app) {
+    carouselStripDelegated = true;
+    app.addEventListener("click", onCarouselStripClick);
+    app.addEventListener("keydown", onCarouselStripKeydown);
+  }
 }
 
 function formatMetaExpiredTokenHint(message) {
@@ -2265,6 +2458,28 @@ Which API? You are calling: ${API_BASE}
 • Verify this server’s token: open GET ${API_BASE}/api/meta/token-status in the browser (valid + expiry).`;
 }
 
+/** If the API returns `{ error, meta }` from Graph, merge user_msg / blame fields (server usually inlines these into `error` now). */
+function appendApiErrorMeta(message, data) {
+  const m = data?.meta;
+  if (!m || typeof m !== "object") return message;
+  const bits = [];
+  const um = m.error_user_msg;
+  if (um && String(um).trim() && !String(message).includes(String(um).trim())) bits.push(String(um).trim());
+  if (m.error_user_title) bits.push(`(${m.error_user_title})`);
+  if (m.blame_field_specs != null) {
+    try {
+      bits.push(JSON.stringify(m.blame_field_specs));
+    } catch {
+      /* ignore */
+    }
+  }
+  if (m.code != null && bits.length === 0) {
+    bits.push(`Graph code ${m.code}${m.error_subcode != null ? ` subcode ${m.error_subcode}` : ""}`);
+  }
+  if (!bits.length) return message;
+  return `${message}\n\n${bits.join(" ")}`;
+}
+
 async function apiFetch(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (CLIENT_API_KEY) headers["X-API-Key"] = CLIENT_API_KEY;
@@ -2272,7 +2487,8 @@ async function apiFetch(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const raw = data.error != null ? (typeof data.error === "string" ? data.error : JSON.stringify(data.error)) : "";
-    throw new Error(formatMetaExpiredTokenHint(raw || `Request failed: ${path}`));
+    const combined = appendApiErrorMeta(raw || `Request failed: ${path}`, data);
+    throw new Error(formatMetaExpiredTokenHint(combined));
   }
   return data;
 }
@@ -2345,7 +2561,13 @@ async function loadDashboard(opts = {}) {
     dashboard.splitCompare = data.splitCompare || [];
     dashboard.insightsFreshness = data.insightsFreshness ?? null;
     dashboard.hooks = data.hooks || [];
-    dashboard.adPreview = data.adPreview || dashboard.adPreview;
+    {
+      const base = data.adPreview || dashboard.adPreview || {};
+      dashboard.adPreview = {
+        ...base,
+        carouselCards: mergeAdPreviewCarouselCards(data.adPreview, dashboard),
+      };
+    }
     applyLocalPreviewImageBlob();
     dashboard.business = data.business || dashboard.business;
     // Keep prior uploads if API response omits `assets` (stale server) or merge server truth when present.

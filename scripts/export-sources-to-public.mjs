@@ -17,6 +17,7 @@ const FILES = [
   "vercel.json",
   "vitest.config.js",
   "src/main.js",
+  "src/creative-meta-specs.js",
   "src/style.css",
   "src/counter.js",
   "server/index.js",
@@ -71,7 +72,7 @@ async function main() {
 
   const out = {
     document: "my-project-source-snapshot",
-    version: "1.3.0",
+    version: "1.4.0",
     description_si:
       "Vite UI + Node API (travel-roi bot) — full source snapshot embedded for backup / portability.",
     generatedAt: new Date().toISOString(),

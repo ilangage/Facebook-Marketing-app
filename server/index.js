@@ -21,6 +21,8 @@ import {
   normalizeTargetingSearchQuery,
   fetchAccessTokenDebugInfo,
   getAccessTokenFingerprint,
+  isCampaignBudgetOptimization,
+  isCampaignBudgetOptimizationMulti,
 } from "./meta-graph.js";
 import { upsertTargetingCatalogRows, listCachedTargetingSearch } from "./targeting-catalog.js";
 import {
@@ -478,6 +480,8 @@ function createServer() {
           hasAppSecret: Boolean(cfg.appSecret),
           tokenFingerprint: getAccessTokenFingerprint(),
           placementPreset: process.env.META_PLACEMENT_PRESET || "fb_ig_mobile",
+          campaignBudgetOptimization: isCampaignBudgetOptimization(),
+          campaignBudgetOptimizationMulti: isCampaignBudgetOptimizationMulti(),
           modeHints: hints,
         });
         return;

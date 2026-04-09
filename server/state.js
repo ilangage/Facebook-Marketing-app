@@ -1,3 +1,5 @@
+import { CAROUSEL_CARDS_TEMPLATE } from "../shared/carousel-template.js";
+
 const now = Date.now();
 
 function useDemoSeed() {
@@ -105,9 +107,9 @@ function buildDemoState() {
       linkUrl: "http://localhost:5173",
       displayLink: "localhost",
       cta: "Learn more",
-      mediaType: "image",
-      mediaUrl: "https://picsum.photos/seed/adpreview/1200/630",
-      carouselCards: [],
+      mediaType: "carousel",
+      mediaUrl: "https://picsum.photos/seed/adpreview/1200/628",
+      carouselCards: structuredClone(CAROUSEL_CARDS_TEMPLATE),
       deliveryStatus: "PAUSED",
       metaIds: {},
     },
@@ -147,9 +149,9 @@ function buildMinimalState() {
       linkUrl: "http://localhost:5173",
       displayLink: "localhost",
       cta: "Learn more",
-      mediaType: "image",
-      mediaUrl: "https://picsum.photos/seed/adpreview/1200/630",
-      carouselCards: [],
+      mediaType: "carousel",
+      mediaUrl: "https://picsum.photos/seed/adpreview/1200/628",
+      carouselCards: structuredClone(CAROUSEL_CARDS_TEMPLATE),
       deliveryStatus: "PAUSED",
       metaIds: {},
     },

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { normalizeAdsetSpecs, normalizeTargetingSearchQuery } from "./meta-graph.js";
+import {
+  normalizeAdsetSpecs,
+  normalizeTargetingSearchQuery,
+  isCampaignBudgetOptimization,
+  isCampaignBudgetOptimizationMulti,
+} from "./meta-graph.js";
 
 describe("normalizeAdsetSpecs", () => {
   it("returns single spec from legacy adsetName + targeting", () => {
@@ -36,5 +41,22 @@ describe("normalizeTargetingSearchQuery", () => {
   it("strips wrapping quotes", () => {
     expect(normalizeTargetingSearchQuery('"Sri Lanka travel"')).toBe("Sri Lanka travel");
     expect(normalizeTargetingSearchQuery("'travel'")).toBe("travel");
+  });
+});
+
+describe("isCampaignBudgetOptimization", () => {
+  it("is true when META_CBO unset (default)", () => {
+    const prev = process.env.META_CBO;
+    delete process.env.META_CBO;
+    expect(isCampaignBudgetOptimization()).toBe(true);
+    expect(isCampaignBudgetOptimizationMulti()).toBe(true);
+    process.env.META_CBO = prev;
+  });
+
+  it("is false when META_CBO=false", () => {
+    const prev = process.env.META_CBO;
+    process.env.META_CBO = "false";
+    expect(isCampaignBudgetOptimization()).toBe(false);
+    process.env.META_CBO = prev;
   });
 });

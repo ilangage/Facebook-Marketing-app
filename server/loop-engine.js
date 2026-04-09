@@ -6,7 +6,15 @@ import {
   recordScaleHistory,
   getInsightsFreshness,
 } from "./engine-store.js";
-import { isMetaConfigured, setObjectStatus, getAdsetById, updateAdsetDailyBudget } from "./meta-graph.js";
+import {
+  isMetaConfigured,
+  setObjectStatus,
+  getAdsetById,
+  getCampaignById,
+  updateAdsetDailyBudget,
+  updateCampaignDailyBudget,
+  isCampaignBudgetOptimization,
+} from "./meta-graph.js";
 import { getScalingConfig, clampBudgetMinor, getEffectiveScaleMultiplier } from "./scaling-config.js";
 
 function useMockMeta() {
@@ -79,17 +87,31 @@ export async function runLoopTick() {
               error: `Scale cooldown active (${Math.ceil(cfg.cooldownMs / 3600000)}h)`,
             });
           } else {
-            const adset = await getAdsetById(row.metaAdsetId);
-            const currentMinor = Number(adset.daily_budget || 0);
+            const useCbo = isCampaignBudgetOptimization();
             const mult = getEffectiveScaleMultiplier(state.targeting);
-            const rawNext = Math.round(currentMinor * mult);
-            const nextMinor = clampBudgetMinor(rawNext, cfg);
-            await updateAdsetDailyBudget(row.metaAdsetId, nextMinor);
+            let currentMinor = 0;
+            let nextMinor = 0;
+            if (useCbo && row.metaCampaignId) {
+              const camp = await getCampaignById(row.metaCampaignId);
+              currentMinor = Number(camp.daily_budget || 0);
+              const rawNext = Math.round(currentMinor * mult);
+              nextMinor = clampBudgetMinor(rawNext, cfg);
+              await updateCampaignDailyBudget(row.metaCampaignId, nextMinor);
+            } else {
+              const adset = await getAdsetById(row.metaAdsetId);
+              currentMinor = Number(adset.daily_budget || 0);
+              const rawNext = Math.round(currentMinor * mult);
+              nextMinor = clampBudgetMinor(rawNext, cfg);
+              await updateAdsetDailyBudget(row.metaAdsetId, nextMinor);
+            }
             recordScaleHistory(row.metaAdsetId, nextMinor);
             metaResults.push({
               adset: action.adset,
               ok: true,
-              meta: `scaled adset budget ${currentMinor}→${nextMinor} (min ${cfg.minMinor} max ${cfg.maxMinor})`,
+              meta:
+                useCbo && row.metaCampaignId
+                  ? `scaled campaign budget ${currentMinor}→${nextMinor} (CBO, min ${cfg.minMinor} max ${cfg.maxMinor})`
+                  : `scaled adset budget ${currentMinor}→${nextMinor} (min ${cfg.minMinor} max ${cfg.maxMinor})`,
             });
           }
         } catch (e) {

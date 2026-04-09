@@ -26,7 +26,7 @@ export function applyAdPreviewFromBody(body, opts = {}) {
   const isCarousel = cards.length >= 2 || body.mode === "carousel";
   const mediaUrl = isVideo
     ? String(fileUrl || "")
-    : String(body.imageUrl || body.url || "https://picsum.photos/seed/adpreview/1200/630");
+    : String(body.imageUrl || body.url || "https://picsum.photos/seed/adpreview/1200/628");
 
   const prevPreview = state.lastAdPreview || {};
   let deliveryStatus = "PAUSED";
@@ -49,12 +49,27 @@ export function applyAdPreviewFromBody(body, opts = {}) {
     mediaType: isCarousel ? "carousel" : isVideo ? "video" : "image",
     mediaUrl,
     carouselCards: isCarousel
-      ? cards.map((card) => ({
-          headline: card.headline || card.name || "",
-          description: card.description || "",
-          link: card.link || link,
-          imageUrl: card.imageUrl || card.url || "",
-        }))
+      ? cards.map((raw) => {
+          const card = raw && typeof raw === "object" ? raw : {};
+          /** Spread first so template/extra keys round-trip; then normalize known fields for preview + Meta. */
+          const merged = {
+            ...card,
+            headline: String(card.headline ?? card.name ?? ""),
+            description: card.description != null ? String(card.description) : "",
+            link: card.link != null && String(card.link).trim() !== "" ? String(card.link) : link,
+            imageUrl: String(card.imageUrl || card.url || ""),
+            priceLabel: card.priceLabel != null ? String(card.priceLabel) : "",
+            price: card.price != null ? String(card.price) : "",
+          };
+          if (Object.prototype.hasOwnProperty.call(card, "badge")) {
+            merged.badge = card.badge == null || card.badge === "" ? "" : String(card.badge);
+          }
+          if (card.tourType != null) merged.tourType = String(card.tourType);
+          else if (card.category != null && merged.tourType == null) merged.tourType = String(card.category);
+          if (card.travelersLine != null) merged.travelersLine = String(card.travelersLine);
+          else if (card.travelers != null && merged.travelersLine == null) merged.travelersLine = String(card.travelers);
+          return merged;
+        })
       : [],
     deliveryStatus,
     metaIds: result
@@ -68,44 +83,33 @@ export function applyAdPreviewFromBody(body, opts = {}) {
   };
 }
 
-/** After POST /api/meta/upload-image — point feed preview at the same URL (https or data:). */
+/** After POST /api/meta/upload-image — hero + 3 carousel cards use the same image (Upload & build sync). */
 export function syncAdPreviewFromUploadedImage(body) {
   const url = body?.url || body?.imageUrl;
   if (!url || typeof url !== "string") return;
   const prev = state.lastAdPreview || {};
-  const cards = Array.isArray(prev.carouselCards) ? prev.carouselCards.filter(Boolean) : [];
-  const keepCarousel = prev.mediaType === "carousel" && cards.length >= 2;
-
-  if (keepCarousel) {
-    applyAdPreviewFromBody(
-      {
-        message: prev.primaryText,
-        headline: prev.headline,
-        description: prev.description,
-        link: prev.linkUrl,
-        pageName: prev.pageName,
-        cta: prev.cta,
-        imageUrl: url,
-        url,
-        mode: "carousel",
-        carouselCards: cards,
-      },
-      {}
-    );
-    return;
-  }
+  const c = getMetaConfig();
+  const link = prev.linkUrl || c.appBaseUrl;
+  const carouselCards = [1, 2, 3].map((n) => ({
+    headline: `Package ${n}`,
+    imageUrl: url,
+    url,
+    link,
+    priceLabel: "",
+  }));
 
   applyAdPreviewFromBody(
     {
       message: prev.primaryText,
       headline: prev.headline,
       description: prev.description,
-      link: prev.linkUrl,
+      link,
       pageName: prev.pageName,
       cta: prev.cta,
       imageUrl: url,
       url,
-      mode: "image",
+      mode: "carousel",
+      carouselCards,
     },
     {}
   );
